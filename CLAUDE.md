@@ -96,8 +96,8 @@ gcc -o m68kmake m68kmake.c
 The emulator applies several bypasses to get through the Mac Classic ROM boot:
 
 1. **Memory test bypass** — ROM tests at $401CF0, $401D80, $401D96 force D6=0
-2. **SCSI polling bypass** — Clear loop counters at $41A44A (gated to frame_count < 700)
-2b. **SCSI boot_mode** — `mac_scsi.c` returns $00 for all reads during boot (prevents SCSI Manager heap allocation that crashes INIT loading). Enabled via `scsi_set_active(true)` at post-boot.
+2. **SCSI polling bypass** — Clear loop counters at $41A44A (unconditional — must remain active during INIT loading)
+2b. **SCSI boot_mode** — `mac_scsi.c` returns $00 for all reads during boot (prevents SCSI Manager heap allocation that crashes INIT loading). Enabled via `scsi_set_active(true)` at idle loop detection.
 3. **Overlay one-shot latch** — First ORA write clears ROM overlay permanently
 4. **I/O completion bypass** — Fulfills disk reads directly from embedded flash image
 5. **StartUpScreen patch** — BNE→BRA to skip missing DSAT resource
