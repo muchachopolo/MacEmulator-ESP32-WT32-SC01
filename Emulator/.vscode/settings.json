@@ -6,7 +6,8 @@
     ],
     "idf.toolsPathWin": "C:\\Users\\pablo.daza\\.espressif",
     "files.associations": {
-        "lcd.h": "c"
+        "lcd.h": "c",
+        "esp_panel_library.h": "c"
     },
     "files.exclude": {
         "**/build": true
@@ -16,5 +17,6 @@
     },
     "C_Cpp.files.exclude": {
         "**/build": true
-    }
+    },
+    "C_Cpp.intelliSenseMemoryLimit": 8192
 }

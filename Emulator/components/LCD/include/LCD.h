@@ -1,10 +1,10 @@
-#include "driver/spi_master.h"
+//#include "driver/spi_master.h"
 
 #ifndef WT32_SC01_H
     #define WT32_SC01_H
 
     // SPI LCD Pins
-    #define WT32_LCD_HOST          HSPI_HOST
+    /*#define WT32_LCD_HOST          HSPI_HOST
     #define TFT_MISO               -1
     #define WT32_LCD_MOSI          13
     #define WT32_LCD_CLK           14
@@ -16,6 +16,6 @@
     // LCD Dimensions
     #define WT32_LCD_WIDTH         320
     #define WT32_LCD_HEIGHT        480
-
+    */
     // Function declarations
-#endif // WT32_SC01_H
+#endif

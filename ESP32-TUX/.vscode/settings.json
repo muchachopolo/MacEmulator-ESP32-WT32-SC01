@@ -3,5 +3,14 @@
     "idf.adapterTargetName": "esp32s3",
     "idf.openOcdConfigs": [
         "board/esp32-wrover-kit-3.3v.cfg"
-    ]
+    ],
+    "files.exclude": {
+        "**/build": true
+    },
+    "search.exclude": {
+        "**/build": true
+    },
+    "C_Cpp.files.exclude": {
+        "**/build": true
+    }
 }
