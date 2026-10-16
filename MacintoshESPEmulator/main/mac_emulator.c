@@ -214,6 +214,12 @@ void mac_emu_run(void *param)
     uint64_t prof_exec_sum = 0, prof_total_sum = 0;
     int prof_frame_count = 0;
 
+    /* PC histogram: 4KB pages, buckets 0-511 RAM, 512-639 ROM */
+    static uint32_t pc_hist[640];
+    static uint32_t pc_bad_count = 0;
+    static int pc_samples = 0;
+    static int hist_report_at = 3000;
+
     while (1) {
         /* Execute one frame's worth of CPU cycles */
         int cycles_remaining = MAC_CYCLES_PER_VBLANK;
@@ -2646,6 +2652,14 @@ void mac_emu_run(void *param)
 
         frame_count++;
 
+        if (mac_post_boot && (frame_count & 63) == 0) {
+            uint32_t pc = m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF;
+            if (pc < 0x200000) pc_hist[pc >> 12]++;
+            else if (pc >= 0x400000 && pc < 0x480000) pc_hist[512 + ((pc - 0x400000) >> 12)]++;
+            else pc_bad_count++;
+            pc_samples++;
+        }
+
         /* Track DSErrCode ($0AF0) changes and dump state around boot 2/3 */
         {
             static int16_t last_dserr = 0;
@@ -2796,6 +2810,29 @@ void mac_emu_run(void *param)
                 int speed_pct = (wall_ms > 0) ? (mac_ms * 100 / wall_ms) : 0;
                 ESP_LOGI(TAG, "SPEED: %d frames in %dms (mac=%dms) => %d%% real-time",
                          frames_done, wall_ms, mac_ms, speed_pct);
+                ESP_LOGI(TAG, "MACPC: %06X", m68k_get_reg(NULL, M68K_REG_PC));
+                if (frame_count >= hist_report_at && pc_samples > 0) {
+                    int seen_idx[10];
+                    for (int rank = 0; rank < 10; rank++) {
+                        int best = -1;
+                        uint32_t bestv = 0;
+                        for (int i = 0; i < 640; i++) {
+                            int dup = 0;
+                            for (int s = 0; s < rank; s++)
+                                if (seen_idx[s] == i) { dup = 1; break; }
+                            if (!dup && pc_hist[i] > bestv) { bestv = pc_hist[i]; best = i; }
+                        }
+                        if (best < 0 || bestv == 0) break;
+                        seen_idx[rank] = best;
+                        uint32_t page = (best < 512) ? ((uint32_t)best << 12)
+                            : (0x400000u + ((uint32_t)(best - 512) << 12));
+                        ESP_LOGI(TAG, "PC-HIST: page=%06X share=%d%% count=%lu",
+                                 page, (int)(bestv * 100 / pc_samples), (unsigned long)bestv);
+                    }
+                    ESP_LOGI(TAG, "BADPC: %lu bad of %d samples",
+                             (unsigned long)pc_bad_count, pc_samples);
+                    hist_report_at = frame_count + 3000;
+                }
                 /* Profiling breakdown: exec vs overhead */
                 if (prof_frame_count > 0 && prof_total_sum > 0) {
                     uint64_t overhead = (prof_total_sum > prof_exec_sum)
