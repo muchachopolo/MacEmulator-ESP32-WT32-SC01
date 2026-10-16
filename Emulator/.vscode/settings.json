@@ -7,5 +7,14 @@
     "idf.toolsPathWin": "C:\\Users\\pablo.daza\\.espressif",
     "files.associations": {
         "lcd.h": "c"
+    },
+    "files.exclude": {
+        "**/build": true
+    },
+    "search.exclude": {
+        "**/build": true
+    },
+    "C_Cpp.files.exclude": {
+        "**/build": true
     }
 }
