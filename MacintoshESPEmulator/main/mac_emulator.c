@@ -10,6 +10,7 @@
 #include "mac_via.h"
 #include "mac_scc.h"
 #include "mac_iwm.h"
+#include "mac_scsi.h"
 #include "m68k.h"
 
 #include <string.h>
@@ -361,13 +362,19 @@ void mac_emu_run(void *param)
             }
 
             /* SCSI polling bypass: ROM at 41A44A polls SCSI BSY in a tight loop.
-             * With no SCSI device, clear loop counters to exit quickly. */
+             * With no SCSI device, clear loop counters to exit quickly.
+             * Must remain active at ALL times — the ROM's SCSI Manager
+             * scans the bus during boot AND INIT loading. Without this
+             * bypass, the scan causes heap corruption (crash at F5239). */
             {
                 if (pc_slice == 0x41A44A || pc_slice == 0x41A44E || pc_slice == 0x41A452) {
                     m68k_set_reg(M68K_REG_D1, 0);
                     m68k_set_reg(M68K_REG_D5, 0);
                 }
             }
+
+            /* DM-spin rescue handled at instruction-fetch level in mac_memory.c
+             * (read16_dm_spin_rescue at $4031BE). No per-slice check needed. */
 
             /* Boot _Read bypass: ROM-level NOP at $400CAC handled in
              * mac_memory.c via mac_boot_read_bypass flag. */
@@ -2508,6 +2515,10 @@ void mac_emu_run(void *param)
                 idle_loop_frames++;
                 if (!idle_loop_logged && idle_loop_frames >= 3) {
                     idle_loop_logged = true;
+                    /* Enable SCSI register emulation now that Finder is stable.
+                     * Must NOT be enabled during boot/INIT loading — SCSI Manager
+                     * init changes heap layout, causing crash at F5239. */
+                    scsi_set_active(true);
                     ESP_LOGW(TAG, "IDLE-LOOP entered at F%d PC=$%06X SP=$%06X",
                              frame_count, pc_idle,
                              m68k_get_reg(NULL, M68K_REG_SP) & 0xFFFFFF);
@@ -2594,6 +2605,7 @@ void mac_emu_run(void *param)
                      iwm_get_sense_poll_count());
 
             /* (ADB bypass moved to run every frame — see above) */
+
 
             /* If PC is in the decompressor ($8E00-$AB00), dump bitstream progress */
             uint32_t fl_pc = m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF;

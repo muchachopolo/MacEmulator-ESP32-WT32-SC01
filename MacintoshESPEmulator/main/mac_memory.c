@@ -8,6 +8,7 @@
 #include "mac_emulator.h"
 #include "mac_via.h"
 #include "mac_scc.h"
+#include "mac_scsi.h"
 #include "mac_iwm.h"
 #include "m68k.h"
 
@@ -84,6 +85,7 @@ bool mac_mem_init(const uint8_t *rom_data, uint32_t rom_sz,
     /* Initialize peripherals */
     via_init();
     scc_init();
+    scsi_init();
     iwm_init(disk_data, disk_size);
 
     return true;
@@ -143,12 +145,9 @@ static inline uint8_t mem_read_byte(uint32_t address)
         }
     }
 
-    /* SCSI NCR 5380: 0x580000-0x5FFFFF
-     * Return 0x00 for all registers = bus free, no devices.
-     * Without this stub, reads return 0xFF (all signals asserted),
-     * which looks like a stuck SCSI bus and confuses the ROM. */
+    /* SCSI NCR 5380: 0x580000-0x5FFFFF */
     if (address >= 0x580000 && address < 0x600000) {
-        return 0x00;
+        return scsi_read(address);
     }
 
     /* SCC read */
@@ -403,6 +402,12 @@ static inline void mem_write_byte(uint32_t address, uint8_t value)
         /* ROM at 0x400000-0x4FFFFF — fall through to peripheral checks */
     }
 
+    /* SCSI NCR 5380: 0x580000-0x5FFFFF */
+    if (address >= 0x580000 && address < 0x600000) {
+        scsi_write(address, value);
+        return;
+    }
+
     /* Writes below peripheral space: ROM or unmapped */
     if (address < 0x800000) {
         return; /* Write to ROM/unmapped - ignored */
@@ -460,6 +465,46 @@ static inline uint16_t rom_word_at(uint32_t addr)
 {
     uint32_t a = addr & rom_mask;
     return (rom[a] << 8) | rom[a + 1];
+}
+
+/* DM-spin rescue: intercept at $4031BE (DM _Read polling loop).
+ * When the CPU fetches the loop instruction, check if A0's PB is
+ * a .SONY request with ioResult > 0 (stuck).  Force-complete it.
+ * Returns the real ROM word if not a stuck .SONY request. */
+static uint16_t read16_dm_spin_rescue(void)
+{
+    uint32_t a0 = m68k_get_reg(NULL, M68K_REG_A0) & 0xFFFFFF;
+    uint32_t a0m = a0 & ram_mask;
+    if (ram && a0m + 0x32 < ram_size) {
+        int16_t ioRefNum = (int16_t)((ram[a0m+0x18]<<8)|ram[a0m+0x19]);
+        int16_t ioResult = (int16_t)((ram[a0m+0x10]<<8)|ram[a0m+0x11]);
+        if (ioRefNum == -5 && ioResult > 0) {
+            /* Fulfill from disk image */
+            uint32_t io_buf = READ_LONG(ram, a0m+0x20);
+            uint32_t io_cnt = READ_LONG(ram, a0m+0x24);
+            int32_t  io_off = (int32_t)READ_LONG(ram, a0m+0x2E);
+            uint8_t *disk = iwm_get_disk_data();
+            uint32_t dsize = iwm_get_disk_size();
+            uint32_t buf_m = io_buf & ram_mask;
+            if (disk && io_cnt > 0 && io_cnt <= 0x100000 &&
+                buf_m + io_cnt <= ram_size &&
+                io_off >= 0 && (uint32_t)io_off + io_cnt <= dsize) {
+                memcpy(ram + buf_m, disk + io_off, io_cnt);
+            }
+            /* ioResult = noErr, ioActCount = ioReqCount */
+            ram[a0m+0x10] = 0; ram[a0m+0x11] = 0;
+            ram[a0m+0x28]=ram[a0m+0x24]; ram[a0m+0x29]=ram[a0m+0x25];
+            ram[a0m+0x2A]=ram[a0m+0x26]; ram[a0m+0x2B]=ram[a0m+0x27];
+            m68k_set_reg(M68K_REG_D0, 0);
+            static int rescue_cnt = 0;
+            if (rescue_cnt < 30) {
+                ESP_LOGW(TAG, "DM-RESCUE #%d PB=$%06X off=%ld cnt=%lu",
+                         rescue_cnt, a0, (long)io_off, (unsigned long)io_cnt);
+                rescue_cnt++;
+            }
+        }
+    }
+    return rom_word_at(0x4031BE);
 }
 
 /* Intercept Device Manager _Read handler at $40315C.
@@ -871,6 +916,7 @@ unsigned int m68k_read_memory_16(unsigned int address)
             if (address == 0x40076C) return 0x4E75;  /* RTS */
 
             if (address == 0x40315C) return read16_dm_read();
+            if (address == 0x4031BE) return read16_dm_spin_rescue();
             if (address == 0x4031E0) return read16_dm_ctl();
             if (address == 0x4031EE) return read16_dm_stat();
             if (address == 0x400DF4) read16_sub6_patch();  /* patches PB, falls through */
@@ -1227,6 +1273,7 @@ IRAM_ATTR unsigned int m68k_read_immediate_16(unsigned int address)
         if (__builtin_expect(address == 0x40076C, 0)) return 0x4E75; /* RTS */
         /* Device Manager intercepts (Finder disk I/O) */
         if (__builtin_expect(address == 0x40315C, 0)) return read16_dm_read();
+        if (__builtin_expect(address == 0x4031BE, 0)) return read16_dm_spin_rescue();
         if (__builtin_expect(address == 0x4031E0, 0)) return read16_dm_ctl();
         if (__builtin_expect(address == 0x4031EE, 0)) return read16_dm_stat();
         /* .SONY driver intercepts */

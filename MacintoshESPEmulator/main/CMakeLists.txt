@@ -21,6 +21,7 @@ idf_component_register(
          "mac_video.c"
          "mac_via.c"
          "mac_scc.c"
+         "mac_scsi.c"
          "mac_iwm.c"
     INCLUDE_DIRS "."
     REQUIRES log driver esp_timer display musashi freertos esp_psram

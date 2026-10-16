@@ -16,6 +16,7 @@ D:\Personal\Macintosh\
 │   │   ├── mac_emulator.c    # Main emulation loop + boot bypasses
 │   │   ├── mac_memory.c      # Memory map + trap intercepts + disk I/O
 │   │   ├── mac_via.c         # VIA 6522 (timers, interrupts, ADB, overlay)
+│   │   ├── mac_scsi.c         # NCR 5380 SCSI controller (arbitration, no devices)
 │   │   ├── mac_scc.c         # SCC Z8530 stub (serial ports)
 │   │   ├── mac_iwm.c         # IWM/SWIM floppy controller
 │   │   ├── mac_video.c       # Framebuffer → LCD rendering (core 0)
@@ -95,7 +96,8 @@ gcc -o m68kmake m68kmake.c
 The emulator applies several bypasses to get through the Mac Classic ROM boot:
 
 1. **Memory test bypass** — ROM tests at $401CF0, $401D80, $401D96 force D6=0
-2. **SCSI polling bypass** — No SCSI device, clear loop counters at $41A44A
+2. **SCSI polling bypass** — Clear loop counters at $41A44A (gated to frame_count < 700)
+2b. **SCSI boot_mode** — `mac_scsi.c` returns $00 for all reads during boot (prevents SCSI Manager heap allocation that crashes INIT loading). Enabled via `scsi_set_active(true)` at post-boot.
 3. **Overlay one-shot latch** — First ORA write clears ROM overlay permanently
 4. **I/O completion bypass** — Fulfills disk reads directly from embedded flash image
 5. **StartUpScreen patch** — BNE→BRA to skip missing DSAT resource
@@ -107,6 +109,7 @@ The emulator applies several bypasses to get through the Mac Classic ROM boot:
 11. **UNIMP trap handler** — Returns SUBA.L A0,A0; MOVEQ #0,D0; RTS at $400768
 12. **Device Manager intercepts** — read16_dm_read/ctl/stat for .SONY disk I/O
 13. **SEC-RD drive bypass** — SR flag manipulation at $4357F4 for drive ≥ 4
+14. **DM-spin rescue** — Instruction-fetch intercept at $4031BE catches stuck .SONY _Read polling (ioResult=1). `read16_dm_spin_rescue()` in mac_memory.c force-completes I/O from embedded disk image. Without this, async _Read requests that miss the $40315C intercept spin forever at 53% real-time.
 
 ### Performance Optimizations
 
@@ -126,7 +129,7 @@ The emulator applies several bypasses to get through the Mac Classic ROM boot:
 |---------------|--------|
 | $000000-$1FFFFF | RAM (2MB, aliased via mask) |
 | $400000-$43FFFF | ROM (512KB) |
-| $580000-$5FFFFF | SCSI (NCR 5380 stub) |
+| $580000-$5FFFFF | SCSI (NCR 5380 — full register emulation, no devices) |
 | $800000-$9FFFFF | SCC read |
 | $A00000-$BFFFFF | SCC write |
 | $C00000-$DFFFFF | IWM/SWIM |
@@ -187,5 +190,5 @@ Implementation (`mac_emulator.c`):
 - ~~Touch-screen mouse~~ — **DONE**: trackpad-style relative input with tap-to-click and tap-then-drag
 - ~~Mouse clicks~~ — **DONE**: event queue posting to EvQHdr $014A
 - Keyboard input via touch-screen virtual keyboard
-- **Virtual SCSI hard drive** in PSRAM or flash partition for OS installation
+- **Virtual SCSI hard drive** in PSRAM or flash partition for OS installation. NCR 5380 register emulation already works (arbitration, selection timeout, bus status). Need to add a SCSI target device that responds to selection and handles INQUIRY/READ/WRITE commands. Flash budget: ~1.44MB free (app partition 3.94MB, current binary 2.48MB).
 - Strip diagnostic logging for production builds (would reduce flash code size but minimal speed impact since 97% is in Musashi)
