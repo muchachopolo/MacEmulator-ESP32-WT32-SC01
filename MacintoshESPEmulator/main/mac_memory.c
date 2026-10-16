@@ -14,6 +14,7 @@
 #include <string.h>
 #include <esp_log.h>
 #include <esp_heap_caps.h>
+#include <esp_attr.h>
 
 static const char *TAG = "mac_mem";
 int initgraf_seen = 0;  /* Set when _InitGraf ROM entry is accessed */
@@ -29,6 +30,10 @@ static uint32_t ram_mask = 0;       /* For mirroring: ram_size - 1 */
 
 /* Boot bypass flag — set by mac_emulator.c when disk is ready */
 volatile bool mac_boot_read_bypass = false;
+
+/* Post-boot mode — set after Finder is running. Enables lean instruction
+ * fetch path that skips diagnostic watchpoints and logging intercepts. */
+bool mac_post_boot = false;
 
 /* Byte-read helpers for big-endian data */
 #define READ_BYTE(base, addr)   ((base)[addr])
@@ -1165,6 +1170,149 @@ void m68k_write_memory_32(unsigned int address, unsigned int value)
 unsigned int m68k_read_disassembler_8(unsigned int address)  { return m68k_read_memory_8(address); }
 unsigned int m68k_read_disassembler_16(unsigned int address) { return m68k_read_memory_16(address); }
 unsigned int m68k_read_disassembler_32(unsigned int address) { return m68k_read_memory_32(address); }
+
+/* ====================================================================== */
+/* === SEPARATE INSTRUCTION FETCH (M68K_SEPARATE_READS optimization) ==== */
+/* ====================================================================== */
+/*
+ * With M68K_SEPARATE_READS = OPT_ON, Musashi calls dedicated functions
+ * for instruction/immediate fetches and PC-relative reads, separate from
+ * data memory reads. This gives us a lean hot path for instruction fetches
+ * (no diagnostic watchpoints, minimal ROM intercepts), while the full
+ * intercept logic remains in the data-read path (m68k_read_memory_*).
+ *
+ * During boot (!mac_post_boot), all reads fall through to the full
+ * m68k_read_memory_* functions for complete intercept coverage.
+ * After boot, the lean path handles 99%+ of fetches with just
+ * RAM/ROM dispatch + essential functional patches.
+ *
+ * IRAM_ATTR places these in internal SRAM for guaranteed fast access,
+ * bypassing the flash instruction cache entirely.
+ */
+
+IRAM_ATTR unsigned int m68k_read_immediate_16(unsigned int address)
+{
+    address &= 0x00FFFFFF;
+
+    /* During boot: use full read path with all intercepts */
+    if (__builtin_expect(!mac_post_boot, 0)) {
+        return m68k_read_memory_16(address);
+    }
+
+    /* Post-boot: lean RAM fast path */
+    if (__builtin_expect(address < 0x400000, 1)) {
+        uint32_t ra = address & ram_mask;
+        return (ram[ra] << 8) | ram[ra + 1];
+    }
+
+    /* Post-boot: lean ROM fast path with essential patches only.
+     * Only functional intercepts that affect Finder operation are kept.
+     * Diagnostic logging (_InitGraf, _InitFonts, etc.) is omitted. */
+    if (__builtin_expect(address < 0x500000, 1)) {
+        /* UNIMP trap handler: return safe stub instead of system error */
+        if (__builtin_expect(address == 0x400768, 0)) return 0x91C8; /* SUBA.L A0,A0 */
+        if (__builtin_expect(address == 0x40076A, 0)) return 0x7000; /* MOVEQ #0,D0 */
+        if (__builtin_expect(address == 0x40076C, 0)) return 0x4E75; /* RTS */
+        /* Device Manager intercepts (Finder disk I/O) */
+        if (__builtin_expect(address == 0x40315C, 0)) return read16_dm_read();
+        if (__builtin_expect(address == 0x4031E0, 0)) return read16_dm_ctl();
+        if (__builtin_expect(address == 0x4031EE, 0)) return read16_dm_stat();
+        /* .SONY driver intercepts */
+        if (__builtin_expect(address == 0x434B76, 0)) return read16_prime();
+        if (__builtin_expect(address == 0x434BAC, 0)) return read16_sony();
+        /* Return ROM data directly — no diagnostic logging */
+        uint32_t a = address & rom_mask;
+        return (rom[a] << 8) | rom[a + 1];
+    }
+
+    /* Peripheral space (shouldn't happen for instruction fetch) */
+    return m68k_read_memory_16(address);
+}
+
+IRAM_ATTR unsigned int m68k_read_immediate_32(unsigned int address)
+{
+    address &= 0x00FFFFFF;
+
+    if (__builtin_expect(!mac_post_boot, 0)) {
+        return m68k_read_memory_32(address);
+    }
+
+    /* Post-boot: lean RAM read */
+    if (__builtin_expect(address < 0x400000, 1)) {
+        uint32_t ra = address & ram_mask;
+        return ((uint32_t)ram[ra] << 24) | ((uint32_t)ram[ra+1] << 16) |
+               ((uint32_t)ram[ra+2] << 8) | ram[ra+3];
+    }
+
+    /* Post-boot: lean ROM read (no intercepts for 32-bit immediate data) */
+    if (__builtin_expect(address < 0x500000, 1)) {
+        uint32_t a = address & rom_mask;
+        return ((uint32_t)rom[a] << 24) | ((uint32_t)rom[a+1] << 16) |
+               ((uint32_t)rom[a+2] << 8) | rom[a+3];
+    }
+
+    return m68k_read_memory_32(address);
+}
+
+IRAM_ATTR unsigned int m68k_read_pcrelative_8(unsigned int address)
+{
+    address &= 0x00FFFFFF;
+
+    if (__builtin_expect(!mac_post_boot, 0)) {
+        return m68k_read_memory_8(address);
+    }
+
+    if (__builtin_expect(address < 0x400000, 1)) {
+        return ram[address & ram_mask];
+    }
+    if (__builtin_expect(address < 0x500000, 1)) {
+        return rom[address & rom_mask];
+    }
+
+    return m68k_read_memory_8(address);
+}
+
+IRAM_ATTR unsigned int m68k_read_pcrelative_16(unsigned int address)
+{
+    address &= 0x00FFFFFF;
+
+    if (__builtin_expect(!mac_post_boot, 0)) {
+        return m68k_read_memory_16(address);
+    }
+
+    if (__builtin_expect(address < 0x400000, 1)) {
+        uint32_t ra = address & ram_mask;
+        return (ram[ra] << 8) | ram[ra + 1];
+    }
+    if (__builtin_expect(address < 0x500000, 1)) {
+        uint32_t a = address & rom_mask;
+        return (rom[a] << 8) | rom[a + 1];
+    }
+
+    return m68k_read_memory_16(address);
+}
+
+IRAM_ATTR unsigned int m68k_read_pcrelative_32(unsigned int address)
+{
+    address &= 0x00FFFFFF;
+
+    if (__builtin_expect(!mac_post_boot, 0)) {
+        return m68k_read_memory_32(address);
+    }
+
+    if (__builtin_expect(address < 0x400000, 1)) {
+        uint32_t ra = address & ram_mask;
+        return ((uint32_t)ram[ra] << 24) | ((uint32_t)ram[ra+1] << 16) |
+               ((uint32_t)ram[ra+2] << 8) | ram[ra+3];
+    }
+    if (__builtin_expect(address < 0x500000, 1)) {
+        uint32_t a = address & rom_mask;
+        return ((uint32_t)rom[a] << 24) | ((uint32_t)rom[a+1] << 16) |
+               ((uint32_t)rom[a+2] << 8) | rom[a+3];
+    }
+
+    return m68k_read_memory_32(address);
+}
 
 /* Interrupt acknowledge - Mac uses autovectored interrupts */
 int mac_int_ack_handler(int level)

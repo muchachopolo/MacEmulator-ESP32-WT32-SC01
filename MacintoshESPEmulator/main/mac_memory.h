@@ -44,6 +44,10 @@ uint32_t mac_mem_get_ram_size(void);
  * so the ROM's boot loop proceeds to the _Read call. */
 extern volatile bool mac_boot_read_bypass;
 
+/* Post-boot mode: set after Finder is running stably.
+ * Enables lean instruction fetch path (skips diagnostic intercepts). */
+extern bool mac_post_boot;
+
 /* Sync internal SRAM shadow from PSRAM after bulk low-memory patches.
  * Call after installing exception vectors, trap tables, etc. */
 void mac_mem_sync_fast_ram(void);

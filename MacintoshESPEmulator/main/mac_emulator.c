@@ -18,6 +18,7 @@
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <esp_cpu.h>
 #include "display.h"
 
 static const char *TAG = "mac_emu";
@@ -131,11 +132,16 @@ void mac_emu_run(void *param)
     static int trap_ring_idx = 0;
     static bool crash_recovered = false;
 
+    /* Profiling: measure where frame time goes (CPU exec vs overhead) */
+    uint64_t prof_exec_sum = 0, prof_total_sum = 0;
+    int prof_frame_count = 0;
+
     while (1) {
         /* Execute one frame's worth of CPU cycles */
         int cycles_remaining = MAC_CYCLES_PER_VBLANK;
         int total_executed = 0;
         bool vblank_fired = false;
+        uint32_t frame_cstart = esp_cpu_get_cycle_count();
 
         while (cycles_remaining > 0) {
             /* Slice sizing:
@@ -156,26 +162,30 @@ void mac_emu_run(void *param)
             }
             int slice = (cycles_remaining > use_slice) ? use_slice : cycles_remaining;
             iwm_start_slice(slice);
+            uint32_t t_exec0 = esp_cpu_get_cycle_count();
             int executed = m68k_execute(slice);
+            uint32_t t_exec1 = esp_cpu_get_cycle_count();
+            prof_exec_sum += (t_exec1 - t_exec0);
             cycles_remaining -= executed;
             total_executed += executed;
 
+            /* Read PC once per slice — shared by all post-execute checks.
+             * Eliminates 7 redundant m68k_get_reg calls per slice. */
+            uint32_t pc_slice = m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF;
+
             /* === POST-EXECUTE PC VALIDATION ===
-             * Lightweight check after EVERY slice (including fast_slice=40000).
-             * Catches runaway PC before it cascades into unrecoverable state.
-             * Cost: one m68k_get_reg + two comparisons per slice. */
+             * Catches runaway PC before it cascades into unrecoverable state. */
             {
                 static bool crash_detected = false;
                 if (!crash_detected) {
-                    uint32_t pc_chk = m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF;
                     /* Valid ranges: RAM $0-$1FFFFF, ROM $400000-$47FFFF */
-                    if ((pc_chk >= 0x200000 && pc_chk < 0x400000) ||
-                        pc_chk >= 0x480000) {
+                    if ((pc_slice >= 0x200000 && pc_slice < 0x400000) ||
+                        pc_slice >= 0x480000) {
                         crash_detected = true;
                         uint32_t sp_chk = m68k_get_reg(NULL, M68K_REG_SP) & 0xFFFFFF;
                         uint32_t sr_chk = m68k_get_reg(NULL, M68K_REG_SR);
                         ESP_LOGE(TAG, "*** CRASH DETECTED F%d: PC=$%06X SP=$%06X SR=%04X ***",
-                                 frame_count, pc_chk, sp_chk, sr_chk);
+                                 frame_count, pc_slice, sp_chk, sr_chk);
                         ESP_LOGE(TAG, "  D0=$%08X D1=$%08X D2=$%08X D3=$%08X",
                                  m68k_get_reg(NULL, M68K_REG_D0),
                                  m68k_get_reg(NULL, M68K_REG_D1),
@@ -255,21 +265,19 @@ void mac_emu_run(void *param)
              * 3. 0x401D96: TST.L D6 in second memory test (0x401D3E)
              * Clear D6 at ALL THREE so the ROM always sees "all tests passed". */
             if (frame_count < 80) {
-                uint32_t pc = m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF;
-                if (pc == 0x401CF0 || pc == 0x401D80 || pc == 0x401D96) {
+                if (pc_slice == 0x401CF0 || pc_slice == 0x401D80 || pc_slice == 0x401D96) {
                     uint32_t old_d6 = m68k_get_reg(NULL, M68K_REG_D6);
                     if (old_d6 != 0) {
                         m68k_set_reg(M68K_REG_D6, 0);
                         ESP_LOGW(TAG, "BYPASS: Cleared D6 at PC=%06X F%d (was 0x%08X)",
-                                 pc, frame_count, old_d6);
+                                 pc_slice, frame_count, old_d6);
                     }
                 }
             }
 
             /* Log when normal boot entry is reached */
             if (!boot_logged) {
-                uint32_t pc = m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF;
-                if (pc == 0x401092) {
+                if (pc_slice == 0x401092) {
                     boot_logged = true;
                     ESP_LOGI(TAG, "BOOT: Normal boot entry at F%d", frame_count);
                 }
@@ -278,8 +286,7 @@ void mac_emu_run(void *param)
             /* SCSI polling bypass: ROM at 41A44A polls SCSI BSY in a tight loop.
              * With no SCSI device, clear loop counters to exit quickly. */
             {
-                uint32_t pc2 = m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF;
-                if (pc2 == 0x41A44A || pc2 == 0x41A44E || pc2 == 0x41A452) {
+                if (pc_slice == 0x41A44A || pc_slice == 0x41A44E || pc_slice == 0x41A452) {
                     m68k_set_reg(M68K_REG_D1, 0);
                     m68k_set_reg(M68K_REG_D5, 0);
                 }
@@ -293,8 +300,7 @@ void mac_emu_run(void *param)
              * SWIM driver can't complete sector reads, fulfill the request
              * directly from the disk image and set ioResult=0. */
             if (mac_boot_read_bypass) {
-                uint32_t pc_io = m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF;
-                if (pc_io == 0x404332) {
+                if (pc_slice == 0x404332) {
                     static int io_bypass_count = 0;
                     static int io_poll_count = 0;
                     uint8_t *rram = mac_mem_get_ram();
@@ -393,7 +399,7 @@ void mac_emu_run(void *param)
              * Skip entirely after F700 — boot is done, these checks
              * are pure overhead (~500 comparisons/frame at slice=1000). */
             if (frame_count <= 700) {
-                uint32_t pcd = m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF;
+                uint32_t pcd = pc_slice;
                 static uint32_t last_trace_pc = 0;
                 static int trace_count = 0;
                 static int secrd_count = 0;
@@ -987,8 +993,7 @@ void mac_emu_run(void *param)
              * phase which extends well beyond F700.  Only 2 comparisons
              * per slice — negligible overhead with normal_slice=1000. */
             if (mac_boot_read_bypass && frame_count > 700 && frame_count <= 2000) {
-                uint32_t pc_res = m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF;
-                if (pc_res == line_a_handler_addr && line_a_handler_addr != 0) {
+                if (pc_slice == line_a_handler_addr && line_a_handler_addr != 0) {
                     uint32_t sp = m68k_get_reg(NULL, M68K_REG_SP) & 0xFFFFFF;
                     uint8_t *rram = mac_mem_get_ram();
                     uint32_t rsz = mac_mem_get_ram_size();
@@ -1035,8 +1040,7 @@ void mac_emu_run(void *param)
             /* Post-boot safe handler detection (runs ALWAYS, not just F<=700).
              * Lightweight: one PC read + comparison per slice. */
             if (mac_boot_read_bypass && frame_count > 700) {
-                uint32_t pc_safe = m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF;
-                if (pc_safe == 0x000030) {
+                if (pc_slice == 0x000030) {
                     static int post_safe_cnt = 0;
                     post_safe_cnt++;
                     if (post_safe_cnt <= 50 || post_safe_cnt % 200 == 0) {
@@ -1060,11 +1064,17 @@ void mac_emu_run(void *param)
 
             /* One-shot trap table dump at F2000 — show which OS traps
              * are still pointing to our safe handler ($0030) vs System
-             * implementations vs ROM handlers. */
+             * implementations vs ROM handlers.
+             * Also enables post-boot optimizations (lean instruction fetch). */
             {
             static bool trap_table_dumped = false;
             if (frame_count >= 2000 && !trap_table_dumped) {
                 trap_table_dumped = true;
+                /* Enable lean instruction fetch path for M68K_SEPARATE_READS */
+                if (!mac_post_boot) {
+                    mac_post_boot = true;
+                    ESP_LOGI(TAG, "POST-BOOT: lean instruction fetch enabled at F%d", frame_count);
+                }
                 uint8_t *rram = mac_mem_get_ram();
                 if (rram) {
                     int cnt_safe = 0, cnt_rom = 0, cnt_sys = 0, cnt_zero = 0;
@@ -1172,9 +1182,10 @@ void mac_emu_run(void *param)
             }
         }
 
-        /* === DISPATCH LOOP DETECTION (boot only) === */
+        /* Boot-only per-frame checks (single PC read shared between them) */
         if (frame_count < 2000) {
             uint32_t pc = m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF;
+            /* Dispatch loop detection */
             if (pc >= 0x401F38 && pc <= 0x402500) {
                 dispatch_frames++;
                 if (dispatch_frames == 5) {
@@ -1185,11 +1196,7 @@ void mac_emu_run(void *param)
             } else {
                 dispatch_frames = 0;
             }
-        }
-
-        /* IWM busy-wait bypass (boot only) */
-        if (frame_count < 2000) {
-            uint32_t pc = m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF;
+            /* IWM busy-wait bypass */
             if (pc >= 0x40335E && pc <= 0x403364) {
                 iwm_poll_frames++;
                 if (iwm_poll_frames > 3) {
@@ -2582,10 +2589,61 @@ void mac_emu_run(void *param)
 
         /* All patches at F600, disk insert at F650 — see above */
 
+        /* Profiling: accumulate frame timing */
+        {
+            uint32_t frame_cend = esp_cpu_get_cycle_count();
+            prof_total_sum += (frame_cend - frame_cstart);
+            prof_frame_count++;
+        }
+
         /* VBlank is now fired mid-frame (inside the execution loop above).
          * If it wasn't fired this frame (shouldn't happen), fire it now. */
         if (!vblank_fired) {
             via_vblank();
+        }
+
+        /* Write mouse state to Mac low-memory globals once per frame.
+         * Mac Point format: big-endian, 4 bytes = (Y.hi Y.lo X.hi X.lo).
+         * MBState bit 7: 0 = button down, 1 = button up. */
+        if (mac_post_boot) {
+            uint8_t *r = mac_mem_get_ram();
+            if (r) {
+                int mx = mouse_x;
+                int my = mouse_y;
+                bool mb = mouse_button;
+
+                /* MTemp $0828 — raw mouse position before acceleration */
+                r[0x0828] = (my >> 8) & 0xFF;
+                r[0x0829] = my & 0xFF;
+                r[0x082A] = (mx >> 8) & 0xFF;
+                r[0x082B] = mx & 0xFF;
+
+                /* RawMouse $082C — raw mouse position */
+                r[0x082C] = (my >> 8) & 0xFF;
+                r[0x082D] = my & 0xFF;
+                r[0x082E] = (mx >> 8) & 0xFF;
+                r[0x082F] = mx & 0xFF;
+
+                /* Mouse $0830 — current mouse position (normally ROM copies
+                 * from RawMouse, but we set it directly for responsiveness) */
+                r[0x0830] = (my >> 8) & 0xFF;
+                r[0x0831] = my & 0xFF;
+                r[0x0832] = (mx >> 8) & 0xFF;
+                r[0x0833] = mx & 0xFF;
+
+                /* CrsrNew $08CE — set to $FF to trigger cursor redraw */
+                r[0x08CE] = 0xFF;
+
+                /* CrsrCouple $08CF — must be $FF for cursor to track mouse */
+                r[0x08CF] = 0xFF;
+
+                /* MBState $0172 — bit 7: 0=down, 1=up */
+                if (mb) {
+                    r[0x0172] &= ~0x80;  /* button down: clear bit 7 */
+                } else {
+                    r[0x0172] |= 0x80;   /* button up: set bit 7 */
+                }
+            }
         }
 
         /* One-second interrupt every 60 frames (~1Hz) */
@@ -2608,29 +2666,57 @@ void mac_emu_run(void *param)
                 int speed_pct = (wall_ms > 0) ? (mac_ms * 100 / wall_ms) : 0;
                 ESP_LOGI(TAG, "SPEED: %d frames in %dms (mac=%dms) => %d%% real-time",
                          frames_done, wall_ms, mac_ms, speed_pct);
+                /* Profiling breakdown: exec vs overhead */
+                if (prof_frame_count > 0 && prof_total_sum > 0) {
+                    uint64_t overhead = (prof_total_sum > prof_exec_sum)
+                                        ? prof_total_sum - prof_exec_sum : 0;
+                    int exec_pct = (int)(prof_exec_sum * 100 / prof_total_sum);
+                    ESP_LOGI(TAG, "PROFILE: %d frames, exec=%d%% overhead=%d%% (exec=%lluM oh=%lluM cycles)",
+                             prof_frame_count, exec_pct, 100 - exec_pct,
+                             (unsigned long long)(prof_exec_sum / 1000000),
+                             (unsigned long long)(overhead / 1000000));
+                    prof_exec_sum = 0;
+                    prof_total_sum = 0;
+                    prof_frame_count = 0;
+                }
                 speed_base_us = esp_timer_get_time();
                 speed_base_frame = frame_count;
             }
         }
 
-        /* Touch input: poll at ~60Hz to avoid I2C overhead every frame.
-         * Video rendering runs on core 0 (mac_video_task), so no
-         * display work here — this core is pure CPU emulation. */
+        /* Touch input: trackpad-style relative movement.
+         * First touch sets button down but doesn't move cursor.
+         * Swiping moves cursor by the delta. Release sets button up. */
         {
             static int64_t last_touch_us = 0;
+            static bool was_touching = false;
+            static int last_tx = 0, last_ty = 0;
             int64_t now_us = esp_timer_get_time();
             if (now_us - last_touch_us > 16000) {  /* ~60Hz */
                 last_touch_us = now_us;
                 int tx, ty;
                 bool touch = display_get_touch(&tx, &ty);
                 if (touch) {
-                    mac_emu_set_mouse(
-                        (tx * MAC_SCREEN_WIDTH) / DISPLAY_WIDTH,
-                        (ty * MAC_SCREEN_HEIGHT) / DISPLAY_HEIGHT,
-                        true
-                    );
+                    if (was_touching) {
+                        /* Continued touch: move cursor by delta */
+                        int dx = -(ty - last_ty);  /* inverted horizontal */
+                        int dy = tx - last_tx;
+                        if (dx != 0 || dy != 0) {
+                            mac_emu_set_mouse(
+                                mouse_x + dx,
+                                mouse_y + dy,
+                                true
+                            );
+                        }
+                    }
+                    /* First touch or continued: record position, set button */
+                    mouse_button = true;
+                    was_touching = true;
+                    last_tx = tx;
+                    last_ty = ty;
                 } else {
                     mouse_button = false;
+                    was_touching = false;
                 }
             }
         }

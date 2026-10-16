@@ -5,7 +5,7 @@
 A Macintosh Classic emulator running on the WT32-SC01-3.4 board (ESP32-WROVER-B).
 Emulates a 68000 CPU via Musashi, with 512x342 monochrome display scaled to 480x320 RGB565 on an ST7796 SPI LCD with FT5x06 capacitive touch.
 
-**Current status**: System 7.5.3 Finder launches and runs stably. Full boot sequence completes (ROM self-test → boot block → System file → INITs → _InitWindows → _Launch → Finder). Speed: 48-70% real-time.
+**Current status**: System 7.5.3 Finder launches and runs stably with trackpad-style touch input. Full boot sequence completes (ROM self-test → boot block → System file → INITs → _InitWindows → _Launch → Finder). Speed: 66-81% real-time (steady ~75%). Touch screen works as relative trackpad (swipe to move cursor, tap to click).
 
 ## Repository Layout
 
@@ -103,10 +103,22 @@ The emulator applies several bypasses to get through the Mac Classic ROM boot:
 7. **VIA PB4+PB5 force high** — ADB bus idle bits in ORB reads
 8. **VIA SR interrupt emulation** — ADB shift register protocol (gated by `adb_active` flag)
 9. **SCC RR0 Sync/Hunt bit** — Bit 4 set for LocalTalk INIT compatibility
+10. **ROM patches** — Mini vMac approach: checksum skip ($1C68), RAM test skip ($0086, $011E)
+11. **UNIMP trap handler** — Returns SUBA.L A0,A0; MOVEQ #0,D0; RTS at $400768
+12. **Device Manager intercepts** — read16_dm_read/ctl/stat for .SONY disk I/O
+13. **SEC-RD drive bypass** — SR flag manipulation at $4357F4 for drive ≥ 4
+
+### Performance Optimizations
+
+1. **M68K_SEPARATE_READS** (`m68kconf.h`) — Instruction fetches use lean IRAM functions that skip all diagnostic intercepts. Data reads keep full intercept logic. This gave a **17% reduction** in execution cycles.
+2. **mac_post_boot flag** (`mac_memory.h`) — Set at F2000. Enables the lean fetch path. During boot, falls through to the full `m68k_read_memory_16` with all intercepts.
+3. **IRAM_ATTR** — 5 lean read functions placed in internal SRAM (728 bytes, 70KB headroom). Bypasses flash instruction cache for guaranteed fast access.
+4. **PC consolidation** — Single `m68k_get_reg(PC)` per slice shared by all post-execute checks (was 8 separate calls).
+5. **Cycle profiling** — `esp_cpu_get_cycle_count()` measures exec vs overhead. Logged with SPEED report every 300 frames. Shows 97% time in m68k_execute, 3% overhead.
 
 ### CRITICAL: VIA Timer Slice Size
 
-`fast_slice` in `mac_emulator.c` **must stay ≤ 4000 cycles**. The VIA T2 timer often has periods of 100-2000 cycles. With larger slices, `via_tick()` misses timer underflows, corrupting interrupt timing. This was the root cause of a crash at F8000 (PC=$C80584, SP=$000000) seen with fast_slice=40000.
+`fast_slice` in `mac_emulator.c` **must stay ≤ 4000 cycles**. Tested exhaustively up to 40000 with and without timer arm tracking — crashes deterministically at F5251+ (PC enters SCSI range $2Exxxx). The VIA T2 timer often has periods of 100-2000 cycles; larger slices cause `via_tick()` to miss underflows. This is **unsolvable** without running via_tick inside Musashi's execution callback.
 
 ### Memory Map (Mac Classic, normal mode)
 
@@ -120,6 +132,25 @@ The emulator applies several bypasses to get through the Mac Classic ROM boot:
 | $C00000-$DFFFFF | IWM/SWIM |
 | $E00000-$EFFFFF | VIA + SWIM ISM (A12 bank split) |
 
+### Touch Input (Trackpad-Style Mouse)
+
+The FT5x06 capacitive touch panel acts as a relative trackpad, not absolute positioning:
+
+- **Tap**: registers mouse button down at current cursor position (no jump)
+- **Swipe/drag**: moves cursor by finger movement delta
+- **Lift finger**: releases mouse button
+
+Implementation (`mac_emulator.c`):
+1. Polls FT5x06 at ~60Hz via `display_get_touch()` (I2C, core 1)
+2. Touch axes are swapped and horizontal inverted vs display orientation
+3. First touch frame: records position, sets button down, cursor stays put
+4. Subsequent frames: calculates delta, applies to `mouse_x`/`mouse_y`
+5. Per-frame VBlank handler writes to Mac low-memory globals (gated by `mac_post_boot`):
+   - MTemp ($0828), RawMouse ($082C), Mouse ($0830) — big-endian Mac Point (Y.hi Y.lo X.hi X.lo)
+   - CrsrNew ($08CE) = $FF — triggers cursor redraw
+   - CrsrCouple ($08CF) = $FF — keeps cursor coupled to mouse
+   - MBState ($0172) bit 7 — 0=button down, 1=button up
+
 ## Key Design Decisions
 
 1. **Native esp_lcd driver** instead of `esp32_display_panel` managed component (incompatible with ESP-IDF v6.0)
@@ -129,6 +160,7 @@ The emulator applies several bypasses to get through the Mac Classic ROM boot:
 5. **Warning suppression** for Musashi (GCC 15.2.0 is stricter) — see `components/musashi/CMakeLists.txt`
 6. **Disk image in flash** — embedded in flash (.rodata), read-only. Saves PSRAM for RAM.
 7. **2MB Mac RAM** (power-of-2) — required for correct ROM sizing via hardware-style aliasing. Addresses beyond 2MB wrap via `ram_mask = 0x1FFFFF`. 2MB is a valid Mac Classic config (1MB base + 1MB SIMM).
+8. **M68K_SEPARATE_READS** — Splits instruction fetches from data reads in Musashi for lean hot path. Lean functions go in IRAM; data reads keep all diagnostic intercepts.
 
 ## PSRAM Budget (~4MB usable)
 
@@ -141,9 +173,10 @@ The emulator applies several bypasses to get through the Mac Classic ROM boot:
 
 ## Future Work
 
-- **Performance optimization**: Make `via_tick()` handle large cycle counts mathematically so `fast_slice` can be increased beyond 4000 without timer accuracy loss
+- **Further performance**: 97% of time is in m68k_execute(). Gains require optimizing Musashi core (e.g., computed goto dispatch, cycle table in IRAM), reducing PSRAM pressure, or upgrading to 68030 (fewer cycles per instruction). fast_slice increase is confirmed impossible.
 - **68030 upgrade**: Musashi supports 68030 emulation. Change `M68K_EMULATE_030` to `OPT_ON` in `m68kconf.h`, set CPU type to `M68K_CPU_TYPE_68030`, use a 68030-era ROM (Color Classic or LC II).
 - SCC serial emulation (currently stub)
+- ~~Touch-screen mouse~~ — **DONE**: trackpad-style relative input working
 - Keyboard input via touch-screen virtual keyboard
 - **Virtual SCSI hard drive** in PSRAM or flash partition for OS installation
-- Strip diagnostic logging for production builds
+- Strip diagnostic logging for production builds (would reduce flash code size but minimal speed impact since 97% is in Musashi)

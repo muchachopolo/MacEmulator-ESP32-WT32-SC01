@@ -21,7 +21,7 @@
 #define M68K_EMULATE_030            OPT_OFF
 #define M68K_EMULATE_040            OPT_OFF
 
-#define M68K_SEPARATE_READS         OPT_OFF
+#define M68K_SEPARATE_READS         OPT_ON
 #define M68K_SIMULATE_PD_WRITES     OPT_OFF
 
 /* Forward declarations for Mac callback handlers */
