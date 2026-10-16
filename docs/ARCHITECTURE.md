@@ -41,9 +41,10 @@ embedded in flash, and runs the Finder desktop with touch-screen mouse input.
 - 512x342 monochrome video, scaled to 480x320 RGB565 on an SPI LCD
 - Capacitive touch input as trackpad-style mouse
 
-**Current state (April 2026):** System 7.5.3 Finder launches and runs stably.
-Speed is 66-81% real-time (steady ~75%). Touch screen works as a relative trackpad
-(swipe to move cursor, tap to click).
+**Current state (April 2026):** System 7.5.3 Finder launches and runs stably with
+working mouse clicks. Speed is 39-91% real-time (peak ~91% at idle, 57-67% during
+boot). Touch screen works as a relative trackpad with gesture detection (swipe to
+move cursor without clicking, tap to click, tap-then-drag for click-and-drag).
 
 ### File Layout
 
@@ -851,17 +852,20 @@ rate (40 MHz) and the 16 chunk transfers per frame.
 ## 13. Touch Input — Trackpad-Style Mouse
 
 The FT5x06 capacitive touch panel acts as a **relative trackpad** (not absolute
-positioning). Absolute positioning was tried first but caused the cursor to jump
-to random positions because the touch panel and Mac screen have different
-coordinate systems and resolutions.
+positioning) with **tap-to-click** gesture detection. Absolute positioning was
+tried first but caused the cursor to jump to random positions because the touch
+panel and Mac screen have different coordinate systems and resolutions.
 
-### Trackpad Behavior
+### Trackpad Behavior (Gesture Detection)
 
-- **Touch down (first frame)**: Records finger position. Sets mouse button down.
-  Cursor does NOT move — this prevents jumping.
-- **Drag (subsequent frames)**: Calculates delta from last finger position.
-  Moves cursor by that delta. Button stays down.
-- **Lift finger**: Releases mouse button.
+- **Swipe/drag** (finger moves >8px): Moves cursor by finger delta. NO button
+  press. This lets the user move the cursor without accidentally clicking.
+- **Quick tap** (<300ms touch, <8px movement): Generates a click (mouseDown +
+  mouseUp). The tap-vs-drag threshold prevents accidental clicks during movement.
+- **Tap-then-drag** (second touch within 400ms of a tap release): Starts a
+  click-and-drag. The button is held down during the drag, enabling menu selection,
+  window dragging, and icon selection.
+- **Lift finger**: Stops cursor movement, ends any drag.
 
 ### Coordinate Mapping
 
@@ -875,22 +879,79 @@ mouse_x += dx;
 mouse_y += dy;
 ```
 
-### Writing to Mac Low-Memory Globals
+### Mouse Button — Three Layers
 
-Once per frame (after VBlank, gated by `mac_post_boot`), the emulator writes
-mouse state directly to Mac RAM:
+On the Mac Classic (an ADB-based Mac), mouse clicks require posting events to
+the OS event queue. Setting low-memory globals alone is NOT sufficient. Three
+layers work together:
 
 ```c
-// Mac Point format: Y.hi, Y.lo, X.hi, X.lo (big-endian)
-ram[0x0828] = (mouse_y >> 8); ram[0x0829] = mouse_y;  // MTemp
-ram[0x082A] = (mouse_x >> 8); ram[0x082B] = mouse_x;
-ram[0x082C..0x082F] = same;                             // RawMouse
-ram[0x0830..0x0833] = same;                             // Mouse
-ram[0x08CE] = 0xFF;                                     // CrsrNew (trigger redraw)
-ram[0x08CF] = 0xFF;                                     // CrsrCouple (cursor tracks)
-// MBState bit 7: 0 = button down, 1 = button up
+// Layer 1: Event queue posting (ESSENTIAL for clicks)
+// Posts mouseDown/mouseUp events to EvQHdr at $014A
+mac_post_mouse_event(ram, code, mx, my);
+
+// Layer 2: MBState software mirror (for _Button trap and polling code)
 ram[0x0172] = button ? (ram[0x0172] & ~0x80) : (ram[0x0172] | 0x80);
+
+// Layer 3: VIA PB3 hardware button (active low)
+via_set_mouse_button(pressed);  // Sets/clears VIA IRB bit 3
 ```
+
+**Why three layers?** The Mac Classic uses ADB for mouse input. The ADB completion
+routine normally reads mouse data, updates MBState, AND posts mouseDown/mouseUp
+events to the OS event queue. Since ADB is fully bypassed (no real ADB hardware),
+no handler posts events. Applications call GetNextEvent/WaitNextEvent which reads
+from the event queue — NOT from MBState. Without event queue posting, clicks are
+invisible to the system.
+
+### Event Queue Posting Implementation
+
+The `mac_post_mouse_event()` function writes EvQEl (event queue element) structures
+directly to Mac RAM and links them into the EvQHdr queue at $014A:
+
+```c
+// Fixed EvQEl buffers in 68010-reserved vector area (unused on 68000 Mac):
+#define EVT_BUF_DOWN   0x00C0   // mouseDown EvQEl (22 bytes)
+#define EVT_BUF_UP     0x00D8   // mouseUp EvQEl  (22 bytes)
+
+// EvQEl structure (22 bytes):
+// +0:  qLink (4)        — next element pointer (0 = last)
+// +4:  qType (2)        — 5 (evType)
+// +6:  evtQWhat (2)     — 1=mouseDown, 2=mouseUp
+// +8:  evtQMessage (4)  — 0 for mouse events
+// +12: evtQWhen (4)     — Ticks value from $016A
+// +16: evtQWhere (4)    — mouse Point (V.hi V.lo H.hi H.lo)
+// +20: evtQModifiers (2)— 0
+```
+
+Before posting, `evt_in_queue()` walks the active queue to verify the buffer
+isn't still in use from a previous event. After the Mac's GetNextEvent dequeues
+the element, it enters the Event Manager's free pool — this is harmless.
+
+### Writing Cursor Position to Mac Low-Memory Globals
+
+Once per frame (after VBlank, gated by `mac_post_boot` + WMgrPort valid), the
+emulator writes cursor position to Mac RAM — **only when position changes**:
+
+```c
+if (pos_changed) {
+    // Mac Point format: Y.hi, Y.lo, X.hi, X.lo (big-endian)
+    ram[0x0828..0x082B] = mouse_y, mouse_x;              // MTemp
+    ram[0x082C..0x082F] = same;                           // RawMouse
+    ram[0x0830..0x0833] = same;                           // Mouse
+    ram[0x08CE] = 0xFF;                                   // CrsrNew (trigger redraw)
+    ram[0x08CF] = 0xFF;                                   // CrsrCouple
+}
+```
+
+**CRITICAL: CrsrNew crash bug.** Writing `CrsrNew=$FF` unconditionally every
+frame forces cursor redraws that crash the resource decompressor (DCMP) during
+INIT/Finder loading. The decompressor state gets corrupted by the cursor redraw
+interrupt, causing a wild PC jump to unmapped memory. The fix:
+1. Only set CrsrNew when mouse position actually changes from last-written value
+2. Initialize `prev_mx`/`prev_my` to `MAC_SCREEN_WIDTH/2`/`MAC_SCREEN_HEIGHT/2`
+   (matching `mouse_x`/`mouse_y` defaults) to prevent a false delta on the first
+   frame when WMgrPort becomes valid
 
 ---
 
@@ -972,11 +1033,12 @@ Key details:
 
 | Metric | Value |
 |--------|-------|
-| Steady state | 75-76% real-time |
-| Peak | 81% |
-| Range | 66-81% |
+| Steady state (idle loop) | 85-91% real-time |
+| Peak | 91% |
+| During boot/loading | 39-67% |
+| Range | 39-91% |
 | Video | ~10 fps |
-| Exec vs overhead | 97% / 3% |
+| Exec vs overhead | 96-97% / 3-4% |
 | fast_slice | 4000 cycles (MUST NOT exceed) |
 
 ---
@@ -1014,9 +1076,10 @@ Each iteration of `mac_emu_run()` executes one frame (~130,560 CPU cycles):
 │  │   │                                                  │
 │  │   ├── Write mouse state to Mac low-memory globals    │
 │  │   │   (MTemp, RawMouse, Mouse, CrsrNew, MBState)    │
+│  │   │   + Post mouseDown/mouseUp to event queue $014A  │
 │  │   │                                                  │
 │  │   └── Poll touch input (~60 Hz)                      │
-│  │       └── Calculate delta, update mouse_x/mouse_y    │
+│  │       └── Gesture detection: tap/drag/tap-then-drag  │
 │  │                                                      │
 │  └── taskYIELD() — prevent watchdog timeout              │
 └─────────────────────────────────────────────────────────┘
@@ -1127,6 +1190,24 @@ fast_slice > 4000 confirmed impossible.
 Absolute positioning caused cursor jumping. Changed to relative trackpad-style
 movement (delta-based). Writes to MTemp, RawMouse, Mouse, CrsrNew, MBState.
 
+### Phase 12: CrsrNew Crash Fix + VIA Mouse Button
+Unconditional `CrsrNew=$FF` every frame crashed the resource decompressor (DCMP)
+during INIT/Finder loading. Fixed by only writing CrsrNew on actual position change,
+with initial tracking values matching mouse defaults. Separately, mouse clicks didn't
+register because the Mac reads button state from VIA Port B bit 3 (PB3, active low),
+not from MBState. Fixed by adding `via_set_mouse_button()` to update VIA IRB PB3,
+and initializing IRB with PB3=1 ($39) for button-up default.
+
+### Phase 13: Event Queue Posting + Tap-vs-Drag
+Mouse clicks via MBState and VIA PB3 alone did NOT produce visible clicks in the
+Mac UI. Root cause: on the Mac Classic (ADB-based), the event system (GetNextEvent/
+WaitNextEvent) reads mouseDown/mouseUp events from the OS event queue at $014A, NOT
+from MBState. Since ADB is bypassed, no handler posts events. Fixed by implementing
+`mac_post_mouse_event()` which writes EvQEl structures directly to RAM ($00C0/$00D8)
+and links them into the event queue. Also replaced always-button-down-on-touch with
+proper gesture detection: swipe = move cursor (no click), tap = click, tap-then-drag
+= click-and-drag.
+
 ---
 
 ## 19. Current Status and Future Work
@@ -1135,8 +1216,10 @@ movement (delta-based). Writes to MTemp, RawMouse, Mouse, CrsrNew, MBState.
 
 - Full boot: ROM self-test → boot block → System file → INITs → Finder
 - System 7.5.3 desktop with icons, menus, windows
-- Touch-screen trackpad mouse (swipe to move, tap to click)
-- 75% real-time speed (66-81% range)
+- **Working mouse clicks** via event queue posting to $014A
+- Touch-screen trackpad with gesture detection (tap to click, swipe to move, tap-then-drag)
+- Three-layer mouse: event queue + MBState + VIA PB3
+- Peak 91% real-time speed (39-91% range)
 - ~10 fps video output
 - VIA timers and interrupts
 - Full SWIM ISM floppy emulation

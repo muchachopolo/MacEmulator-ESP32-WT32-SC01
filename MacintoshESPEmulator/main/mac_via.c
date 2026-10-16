@@ -67,7 +67,7 @@ void via_init(void)
      *           read gets 0 (no keyboard data), which INITs handle gracefully.
      */
     via.ira = 0x0F;     /* PA0-PA2 high (no diag device), PA3 high (no SCC IRQ) */
-    via.irb = 0x31;     /* PB0 high (RTC), PB4+PB5 high (ADB idle) */
+    via.irb = 0x31;     /* PB0 high (RTC), PB3 low (button down — safe for boot), PB4+PB5 high (ADB idle) */
     via.t1_latch = 0xFFFF;
     via.t1_counter = 0xFFFF;
     ESP_LOGI(TAG, "VIA initialized, overlay enabled");
@@ -76,6 +76,16 @@ void via_init(void)
 void via_reset(void)
 {
     via_init();
+}
+
+void via_set_mouse_button(bool pressed)
+{
+    /* PB3 = mouse button, active low: 0=pressed, 1=released */
+    if (pressed) {
+        via.irb &= ~0x08;
+    } else {
+        via.irb |= 0x08;
+    }
 }
 
 static void via_update_irq(void)

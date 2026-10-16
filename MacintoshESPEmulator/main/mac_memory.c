@@ -346,6 +346,18 @@ static inline void mem_write_byte(uint32_t address, uint8_t value)
         }
     }
 
+    /* DEBUG: Watchpoint on MBState ($0172) to detect Mac-side overwrites */
+    if (mac_boot_read_bypass && address == 0x0172) {
+        static int mb_cnt = 0;
+        if (mb_cnt < 30) {
+            uint32_t pc = m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF;
+            ESP_LOGW(TAG, "WP-MBSTATE: $0172<-%02X PC=$%06X SP=$%06X",
+                     value, pc,
+                     m68k_get_reg(NULL, M68K_REG_SP) & 0xFFFFFF);
+            mb_cnt++;
+        }
+    }
+
     /* Drive queue guard: ROM at $402B26 zeroes DrvQHdr ($0308-$0311)
      * before every boot block execution.  Catch the last byte ($0311)
      * and immediately re-install qHead/qTail -> $000046.

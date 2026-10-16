@@ -38,6 +38,83 @@ static volatile int mouse_x = MAC_SCREEN_WIDTH / 2;
 static volatile int mouse_y = MAC_SCREEN_HEIGHT / 2;
 static volatile bool mouse_button = false;
 
+/* ------------------------------------------------------------------ */
+/* Mac Event Queue posting                                            */
+/* On the Mac Classic (ADB-based), mouseDown/mouseUp events must be   */
+/* posted to the OS event queue — setting MBState alone is not enough */
+/* because GetNextEvent/WaitNextEvent reads from the queue, not from  */
+/* MBState. Since we bypass ADB entirely, no handler posts mouse      */
+/* events. We post them directly using fixed EvQEl buffers in the     */
+/* 68010-reserved vector area ($00C0-$00FF), unused on the 68000 Mac. */
+/* ------------------------------------------------------------------ */
+#define EVT_BUF_DOWN   0x00C0   /* EvQEl for mouseDown (22 bytes) */
+#define EVT_BUF_UP     0x00D8   /* EvQEl for mouseUp  (22 bytes) */
+#define EVTQ_HEAD      0x014C   /* EvQHdr.qHead (long) */
+#define EVTQ_TAIL      0x0150   /* EvQHdr.qTail (long) */
+#define TICKS_GLOBAL   0x016A   /* Ticks low-memory global (long) */
+
+static inline uint32_t rd32(const uint8_t *r, uint32_t a)
+{
+    return ((uint32_t)r[a]<<24)|((uint32_t)r[a+1]<<16)|
+           ((uint32_t)r[a+2]<<8)|r[a+3];
+}
+static inline void wr32(uint8_t *r, uint32_t a, uint32_t v)
+{
+    r[a]=(v>>24)&0xFF; r[a+1]=(v>>16)&0xFF;
+    r[a+2]=(v>>8)&0xFF; r[a+3]=v&0xFF;
+}
+static inline void wr16(uint8_t *r, uint32_t a, uint16_t v)
+{
+    r[a]=(v>>8)&0xFF; r[a+1]=v&0xFF;
+}
+
+/* Check if a given address is currently in the active event queue */
+static bool evt_in_queue(const uint8_t *r, uint32_t target)
+{
+    uint32_t addr = rd32(r, EVTQ_HEAD);
+    for (int i = 0; i < 50 && addr != 0; i++) {
+        if (addr == target) return true;
+        if (addr >= 0x200000) break;  /* invalid pointer */
+        addr = rd32(r, addr);         /* follow qLink */
+    }
+    return false;
+}
+
+/* Post a mouseDown (code=1) or mouseUp (code=2) event to the Mac
+ * event queue. Uses fixed EvQEl buffers at EVT_BUF_DOWN / EVT_BUF_UP. */
+static void mac_post_mouse_event(uint8_t *r, int code, int mx, int my)
+{
+    uint32_t buf = (code == 1) ? EVT_BUF_DOWN : EVT_BUF_UP;
+
+    /* Don't overwrite if our previous event is still in the queue */
+    if (evt_in_queue(r, buf)) return;
+
+    /* Fill EvQEl (22 bytes) */
+    wr32(r, buf + 0,  0);              /* qLink = NULL (last element) */
+    wr16(r, buf + 4,  5);              /* qType = evType */
+    wr16(r, buf + 6,  (uint16_t)code); /* evtQWhat */
+    wr32(r, buf + 8,  0);              /* evtQMessage */
+    wr32(r, buf + 12, rd32(r, TICKS_GLOBAL)); /* evtQWhen */
+    wr16(r, buf + 16, (uint16_t)my);   /* evtQWhere.v */
+    wr16(r, buf + 18, (uint16_t)mx);   /* evtQWhere.h */
+    wr16(r, buf + 20, 0);              /* evtQModifiers */
+
+    /* Link into the event queue */
+    uint32_t head = rd32(r, EVTQ_HEAD);
+    if (head == 0) {
+        /* Queue empty — our element is both head and tail */
+        wr32(r, EVTQ_HEAD, buf);
+        wr32(r, EVTQ_TAIL, buf);
+    } else {
+        /* Append to tail */
+        uint32_t tail = rd32(r, EVTQ_TAIL);
+        if (tail != 0 && tail < 0x200000) {
+            wr32(r, tail, buf);  /* old tail.qLink → our element */
+        }
+        wr32(r, EVTQ_TAIL, buf);
+    }
+}
+
 bool mac_emu_init(void)
 {
     ESP_LOGI(TAG, "Initializing Macintosh Classic emulator...");
@@ -2605,9 +2682,10 @@ void mac_emu_run(void *param)
         /* Write mouse state to Mac low-memory globals once per frame.
          * Mac Point format: big-endian, 4 bytes = (Y.hi Y.lo X.hi X.lo).
          * MBState bit 7: 0 = button down, 1 = button up.
-         * Gate on WMgrPort ($09DE) being initialized — writing cursor
-         * globals before _InitWindows runs causes the Welcome screen to hang
-         * because CrsrNew forces redraws against uninitialized WM state. */
+         * Gate on WMgrPort ($09DE) being initialized, AND only write when
+         * mouse position/button actually changes. Writing CrsrNew=$FF
+         * unconditionally during INIT/Finder loading crashes the resource
+         * decompressor (DCMP) — cursor redraw interrupts corrupt its state. */
         if (mac_post_boot) {
             uint8_t *r = mac_mem_get_ram();
             /* Check WMgrPort at $09DE — $FFFFFFFF means Window Manager not yet init'd */
@@ -2618,36 +2696,70 @@ void mac_emu_run(void *param)
                 int my = mouse_y;
                 bool mb = mouse_button;
 
-                /* MTemp $0828 — raw mouse position before acceleration */
-                r[0x0828] = (my >> 8) & 0xFF;
-                r[0x0829] = my & 0xFF;
-                r[0x082A] = (mx >> 8) & 0xFF;
-                r[0x082B] = mx & 0xFF;
+                /* Only write mouse globals and trigger cursor redraw when
+                 * something actually changed. Writing CrsrNew=$FF every frame
+                 * forces cursor redraws that crash the decompressor during
+                 * INIT/Finder loading (before cursor structures are ready). */
+                static int prev_mx = MAC_SCREEN_WIDTH / 2;
+                static int prev_my = MAC_SCREEN_HEIGHT / 2;
+                static int prev_mb = 0;
+                bool pos_changed = (mx != prev_mx || my != prev_my);
+                bool btn_changed = ((int)mb != prev_mb);
 
-                /* RawMouse $082C — raw mouse position */
-                r[0x082C] = (my >> 8) & 0xFF;
-                r[0x082D] = my & 0xFF;
-                r[0x082E] = (mx >> 8) & 0xFF;
-                r[0x082F] = mx & 0xFF;
+                if (pos_changed) {
+                    prev_mx = mx;
+                    prev_my = my;
 
-                /* Mouse $0830 — current mouse position (normally ROM copies
-                 * from RawMouse, but we set it directly for responsiveness) */
-                r[0x0830] = (my >> 8) & 0xFF;
-                r[0x0831] = my & 0xFF;
-                r[0x0832] = (mx >> 8) & 0xFF;
-                r[0x0833] = mx & 0xFF;
+                    /* MTemp $0828 — raw mouse position before acceleration */
+                    r[0x0828] = (my >> 8) & 0xFF;
+                    r[0x0829] = my & 0xFF;
+                    r[0x082A] = (mx >> 8) & 0xFF;
+                    r[0x082B] = mx & 0xFF;
 
-                /* CrsrNew $08CE — set to $FF to trigger cursor redraw */
-                r[0x08CE] = 0xFF;
+                    /* RawMouse $082C — raw mouse position */
+                    r[0x082C] = (my >> 8) & 0xFF;
+                    r[0x082D] = my & 0xFF;
+                    r[0x082E] = (mx >> 8) & 0xFF;
+                    r[0x082F] = mx & 0xFF;
 
-                /* CrsrCouple $08CF — must be $FF for cursor to track mouse */
-                r[0x08CF] = 0xFF;
+                    /* Mouse $0830 — current mouse position */
+                    r[0x0830] = (my >> 8) & 0xFF;
+                    r[0x0831] = my & 0xFF;
+                    r[0x0832] = (mx >> 8) & 0xFF;
+                    r[0x0833] = mx & 0xFF;
 
-                /* MBState $0172 — bit 7: 0=down, 1=up */
+                    /* CrsrNew $08CE — trigger cursor redraw only on movement */
+                    r[0x08CE] = 0xFF;
+
+                    /* CrsrCouple $08CF — cursor tracks mouse */
+                    r[0x08CF] = 0xFF;
+                }
+
+                /* Update VIA PB3 (hardware mouse button, active low) */
+                via_set_mouse_button(mb);
+
+                /* MBState $0172 — write every frame (Mac code may overwrite).
+                 * bit 7: 0=down, 1=up */
                 if (mb) {
-                    r[0x0172] &= ~0x80;  /* button down: clear bit 7 */
+                    r[0x0172] &= ~0x80;
                 } else {
-                    r[0x0172] |= 0x80;   /* button up: set bit 7 */
+                    r[0x0172] |= 0x80;
+                }
+
+                if (btn_changed) {
+                    prev_mb = (int)mb;
+                    /* Post mouseDown/mouseUp event to the Mac event queue.
+                     * This is essential: the Mac Classic event system (GetNextEvent/
+                     * WaitNextEvent) reads from the queue, not from MBState.
+                     * Without this, clicks are invisible to applications. */
+                    mac_post_mouse_event(r, mb ? 1 : 2, mx, my);
+                    static int btn_log = 0;
+                    if (btn_log < 30) {
+                        ESP_LOGW(TAG, "MOUSE-BTN: %s F%d mx=%d my=%d $172=%02X evQ=%08lX",
+                                 mb ? "DOWN" : "UP", frame_count, mx, my, r[0x0172],
+                                 (unsigned long)rd32(r, EVTQ_HEAD));
+                        btn_log++;
+                    }
                 }
             }
         }
@@ -2691,37 +2803,100 @@ void mac_emu_run(void *param)
         }
 
         /* Touch input: trackpad-style relative movement.
-         * First touch sets button down but doesn't move cursor.
-         * Swiping moves cursor by the delta. Release sets button up. */
+         * - Swipe/drag: moves cursor, NO button press
+         * - Quick tap (< 300ms, < 8px movement): generates click
+         * - Tap-then-drag: tap once, then touch again within 400ms
+         *   to click-and-drag (for moving windows/icons) */
         {
-            static int64_t last_touch_us = 0;
+            static int64_t last_poll_us = 0;
             static bool was_touching = false;
             static int last_tx = 0, last_ty = 0;
+
+            /* Tap detection */
+            static int64_t touch_start_us = 0;
+            static int start_tx = 0, start_ty = 0;
+            static bool is_drag = false;       /* finger moved past threshold */
+            static int64_t last_tap_us = 0;    /* time of last tap-release */
+            static bool tap_drag = false;       /* in tap-then-drag mode */
+            static int tap_frames = 0;          /* frames since tap fired */
+
+            #define TAP_MOVE_THRESH  8      /* px: beyond this = drag */
+            #define TAP_TIME_US      300000 /* 300ms: max tap duration */
+            #define TAP_DRAG_WINDOW  400000 /* 400ms: second touch = tap-drag */
+
             int64_t now_us = esp_timer_get_time();
-            if (now_us - last_touch_us > 16000) {  /* ~60Hz */
-                last_touch_us = now_us;
+            if (now_us - last_poll_us > 16000) {  /* ~60Hz */
+                last_poll_us = now_us;
                 int tx, ty;
                 bool touch = display_get_touch(&tx, &ty);
+
+                /* Tap click has a 2-frame duration: frame N=down, frame N+1=up */
+                if (tap_frames > 0) {
+                    tap_frames--;
+                    if (tap_frames == 0) {
+                        mouse_button = false;  /* release after 1 frame */
+                    }
+                }
+
                 if (touch) {
-                    if (was_touching) {
-                        /* Continued touch: move cursor by delta */
-                        int dx = -(ty - last_ty);  /* inverted horizontal */
+                    if (!was_touching) {
+                        /* Finger just went down */
+                        touch_start_us = now_us;
+                        start_tx = tx;
+                        start_ty = ty;
+                        is_drag = false;
+
+                        /* Check for tap-then-drag: second touch within
+                         * TAP_DRAG_WINDOW of last tap = click-and-drag */
+                        if (last_tap_us > 0 &&
+                            (now_us - last_tap_us) < TAP_DRAG_WINDOW) {
+                            tap_drag = true;
+                            mouse_button = true;
+                        } else {
+                            tap_drag = false;
+                        }
+                    } else {
+                        /* Continued touch: calculate delta */
+                        int dx = -(ty - last_ty);  /* axes swapped + inverted */
                         int dy = tx - last_tx;
-                        if (dx != 0 || dy != 0) {
+
+                        /* Detect if this became a drag */
+                        if (!is_drag) {
+                            int tdx = -(ty - start_ty);
+                            int tdy = tx - start_tx;
+                            if (tdx*tdx + tdy*tdy > TAP_MOVE_THRESH*TAP_MOVE_THRESH) {
+                                is_drag = true;
+                            }
+                        }
+
+                        /* Move cursor on drag (no button unless tap-drag) */
+                        if (is_drag && (dx != 0 || dy != 0)) {
                             mac_emu_set_mouse(
                                 mouse_x + dx,
                                 mouse_y + dy,
-                                true
+                                mouse_button
                             );
                         }
                     }
-                    /* First touch or continued: record position, set button */
-                    mouse_button = true;
                     was_touching = true;
                     last_tx = tx;
                     last_ty = ty;
                 } else {
-                    mouse_button = false;
+                    /* Finger lifted */
+                    if (was_touching) {
+                        int64_t dur = now_us - touch_start_us;
+                        if (!is_drag && dur < TAP_TIME_US) {
+                            /* Quick tap: generate click (down for 1 frame) */
+                            mouse_button = true;
+                            tap_frames = 2;  /* will release after 1 more frame */
+                            last_tap_us = now_us;
+                        } else {
+                            /* Drag ended or long press: release button */
+                            mouse_button = false;
+                            tap_drag = false;
+                            last_tap_us = 0;
+                        }
+                    }
                     was_touching = false;
                 }
             }

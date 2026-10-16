@@ -81,6 +81,9 @@ bool via_get_overlay_was_off(void);
 extern bool via_overlay_fast;
 extern bool via_overlay_was_off_fast;
 
+/* Set mouse button state in VIA Port B (PB3, active low) */
+void via_set_mouse_button(bool pressed);
+
 /* Enable ADB shift register interrupt emulation (call after boot reaches INITs) */
 void via_set_adb_active(bool active);
 

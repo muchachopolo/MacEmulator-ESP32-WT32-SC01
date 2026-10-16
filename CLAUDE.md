@@ -5,7 +5,7 @@
 A Macintosh Classic emulator running on the WT32-SC01-3.4 board (ESP32-WROVER-B).
 Emulates a 68000 CPU via Musashi, with 512x342 monochrome display scaled to 480x320 RGB565 on an ST7796 SPI LCD with FT5x06 capacitive touch.
 
-**Current status**: System 7.5.3 Finder launches and runs stably with trackpad-style touch input. Full boot sequence completes (ROM self-test → boot block → System file → INITs → _InitWindows → _Launch → Finder). Speed: 66-81% real-time (steady ~75%). Touch screen works as relative trackpad (swipe to move cursor, tap to click).
+**Current status**: System 7.5.3 Finder launches and runs stably with trackpad-style touch input and working mouse clicks. Full boot sequence completes (ROM self-test → boot block → System file → INITs → _InitWindows → _Launch → Finder). Speed: 39-91% real-time (peak ~91% at idle, 57-67% during boot). Touch screen works as relative trackpad (swipe to move cursor without clicking, tap to click, tap-then-drag for click-and-drag).
 
 ## Repository Layout
 
@@ -134,22 +134,30 @@ The emulator applies several bypasses to get through the Mac Classic ROM boot:
 
 ### Touch Input (Trackpad-Style Mouse)
 
-The FT5x06 capacitive touch panel acts as a relative trackpad, not absolute positioning:
+The FT5x06 capacitive touch panel acts as a relative trackpad with tap-to-click:
 
-- **Tap**: registers mouse button down at current cursor position (no jump)
-- **Swipe/drag**: moves cursor by finger movement delta
-- **Lift finger**: releases mouse button
+- **Swipe/drag** (>8px movement): moves cursor, NO button press
+- **Quick tap** (<300ms, <8px movement): registers a click (mouseDown + mouseUp)
+- **Tap-then-drag** (second touch within 400ms of tap): click-and-drag for menus/windows
+- **Lift finger**: stops cursor movement / ends drag
 
 Implementation (`mac_emulator.c`):
 1. Polls FT5x06 at ~60Hz via `display_get_touch()` (I2C, core 1)
 2. Touch axes are swapped and horizontal inverted vs display orientation
-3. First touch frame: records position, sets button down, cursor stays put
-4. Subsequent frames: calculates delta, applies to `mouse_x`/`mouse_y`
-5. Per-frame VBlank handler writes to Mac low-memory globals (gated by `mac_post_boot`):
+3. Gesture detection: tracks touch start time/position, classifies as tap or drag
+4. Cursor delta applied only during drags (not on first touch frame)
+5. Mouse button via **three layers**:
+   - **Event queue posting** (`mac_post_mouse_event()`) — Posts mouseDown/mouseUp events directly to the Mac OS event queue (EvQHdr at $014A). Uses fixed EvQEl structures at $00C0 and $00D8 (68010-reserved vector area). **This is the essential layer** — GetNextEvent/WaitNextEvent reads from the queue, not MBState.
+   - **MBState ($0172)** bit 7 — software mirror (0=down, 1=up), written every frame for code that reads MBState directly (_Button trap)
+   - **VIA PB3** (`via_set_mouse_button()`) — hardware button, active low. VIA IRB initialized to $31 (PB3=0, button down during boot — required for boot to work).
+6. Per-frame writes cursor position to Mac low-memory globals (gated by `mac_post_boot` + WMgrPort valid, **only when position changes**):
    - MTemp ($0828), RawMouse ($082C), Mouse ($0830) — big-endian Mac Point (Y.hi Y.lo X.hi X.lo)
-   - CrsrNew ($08CE) = $FF — triggers cursor redraw
+   - CrsrNew ($08CE) = $FF — triggers cursor redraw (**only written when position changes**)
    - CrsrCouple ($08CF) = $FF — keeps cursor coupled to mouse
-   - MBState ($0172) bit 7 — 0=button down, 1=button up
+
+**CRITICAL**: CrsrNew must NOT be written unconditionally every frame — it forces cursor redraws that crash the resource decompressor (DCMP) during INIT/Finder loading. Only set CrsrNew when mouse position actually changes. Initial tracking values must match `mouse_x`/`mouse_y` defaults to prevent a false change on first WMgrPort-valid frame.
+
+**CRITICAL**: On ADB Macs (like Mac Classic), the event system does NOT poll MBState for click detection. Mouse events must be POSTED to the event queue at $014A. Setting MBState alone is insufficient — applications using WaitNextEvent/GetNextEvent/ModalDialog never see clicks without queue-posted events.
 
 ## Key Design Decisions
 
@@ -176,7 +184,8 @@ Implementation (`mac_emulator.c`):
 - **Further performance**: 97% of time is in m68k_execute(). Gains require optimizing Musashi core (e.g., computed goto dispatch, cycle table in IRAM), reducing PSRAM pressure, or upgrading to 68030 (fewer cycles per instruction). fast_slice increase is confirmed impossible.
 - **68030 upgrade**: Musashi supports 68030 emulation. Change `M68K_EMULATE_030` to `OPT_ON` in `m68kconf.h`, set CPU type to `M68K_CPU_TYPE_68030`, use a 68030-era ROM (Color Classic or LC II).
 - SCC serial emulation (currently stub)
-- ~~Touch-screen mouse~~ — **DONE**: trackpad-style relative input working
+- ~~Touch-screen mouse~~ — **DONE**: trackpad-style relative input with tap-to-click and tap-then-drag
+- ~~Mouse clicks~~ — **DONE**: event queue posting to EvQHdr $014A
 - Keyboard input via touch-screen virtual keyboard
 - **Virtual SCSI hard drive** in PSRAM or flash partition for OS installation
 - Strip diagnostic logging for production builds (would reduce flash code size but minimal speed impact since 97% is in Musashi)
