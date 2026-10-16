@@ -2604,10 +2604,16 @@ void mac_emu_run(void *param)
 
         /* Write mouse state to Mac low-memory globals once per frame.
          * Mac Point format: big-endian, 4 bytes = (Y.hi Y.lo X.hi X.lo).
-         * MBState bit 7: 0 = button down, 1 = button up. */
+         * MBState bit 7: 0 = button down, 1 = button up.
+         * Gate on WMgrPort ($09DE) being initialized — writing cursor
+         * globals before _InitWindows runs causes the Welcome screen to hang
+         * because CrsrNew forces redraws against uninitialized WM state. */
         if (mac_post_boot) {
             uint8_t *r = mac_mem_get_ram();
-            if (r) {
+            /* Check WMgrPort at $09DE — $FFFFFFFF means Window Manager not yet init'd */
+            uint32_t wmgr = r ? ((uint32_t)r[0x9DE]<<24)|((uint32_t)r[0x9DF]<<16)|
+                                ((uint32_t)r[0x9E0]<<8)|r[0x9E1] : 0xFFFFFFFF;
+            if (r && wmgr != 0xFFFFFFFF && wmgr != 0x00000000) {
                 int mx = mouse_x;
                 int my = mouse_y;
                 bool mb = mouse_button;
