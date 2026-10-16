@@ -60,7 +60,7 @@ After `fullclean`, you must run `set-target esp32` before building.
 
 ### Musashi Code Generation
 
-Musashi requires a two-stage build. The generated files (`m68kops.c`, `m68kops.h`) are already committed and should not need regeneration unless `m68k_in.c` changes.
+Musashi requires a two-stage build. The generated files (`m68kops.c`, `m68kops.h`) are **gitignored** — they exist only in the working tree, and regeneration replaces them. `m68k_in.c` (tracked) carries `EXT_RAM_BSS_ATTR` on the two big tables so every regeneration places them in PSRAM; without it the link overflows `.dram0.bss` by ~434KB. `m68kmake` does not read `m68kconf.h` — generated ops are config-independent, so a conf flip alone needs no regeneration.
 
 To regenerate (requires a host C compiler like MinGW GCC):
 ```bash

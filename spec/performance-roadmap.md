@@ -3,7 +3,9 @@
 Spec written 2026-10-16. Purpose: durable plan so a future session can resume without
 re-deriving context. Update the Status line and tick boxes as work lands.
 
-Status: Phase 0 done (2026-10-16) — results recorded below. Phase 1 not started.
+Status: Phase 0 done (2026-10-16). Phase 1 attempted and rolled back (2026-10-16) — 68020
+mode crashes the Classic-ROM boot; root cause recorded in Phase 1 below. Working tree is
+back on the 68000 build. Phase 2 not started.
 
 ## Baseline (as of 2026-10-16)
 
@@ -101,6 +103,43 @@ Done when: Finder boots with UNIMP≈0 and no regression in stability.
 Risks: generated tables grow — check `size` output; PSRAM headroom is ~1.4MB, tables
 were 580KB, expect well under budget. `fast_slice ≤ 4000` constraint unchanged.
 Rollback: git revert the three edits; committed 68000-mode ops files are in the tree.
+
+### Phase 1 attempt (2026-10-16) — FAILED, rolled back
+
+What was done: `M68K_EMULATE_020 OPT_ON` + `M68K_CPU_TYPE_68020`, ops regenerated,
+built (0x26e8d0, 38% free), flashed. Boot crashed: `CRASH DETECTED F918: PC=$4E2010`
+inside `_InitFonts`; device showed the Welcome banner with no progress bar.
+
+Root cause — the executed Classic-ROM boot paths contain **68020-only addressing modes**
+that 68000 mode was silently masking:
+- `LEA disp(PC),A0` at $41A028 (resource-handler table setup) — PC-relative EA is 020.
+- `MOVE.W disp(A7),-(A7)` at $41A006 (PACK GetRes call site) — disp(A7) is 020.
+In 68000 mode these raised exception 1010, handled by a ROM handler that is NOT the
+$400768 UNIMP stub — which is why the UNIMP-TRAP counter read 0 in both boots. The
+address-pinned boot bypasses (SCSI counters $41A44A, ADB polling $08446C, DM traps,
+SEC-RD, BOOT3 markers) were derived empirically against that masked flow. With real
+020 semantics the flow diverges: BOOT3-F633..F642 all fire inside the SCSI polling
+loop, the ROM writes garbage clock bytes (BD-WRITE $0210←00/$0211←01 vs Finder's 80/23),
+an extra 0x28 word lands on the stack at TRAP so GetRes reads type=40 and name='??PA'
+instead of 'PACK', and _InitFonts dies. Disk I/O (DM-READ #0..#16) was byte-identical —
+the divergence is purely instruction semantics.
+
+Consequence: Phase 1 needs the same intercept re-derivation discipline as Phase 2 step 4,
+against the Classic ROM's true 020 flow — not a two-line flip. Cheap next attempt if
+revisited: `M68K_ILLG_HAS_CALLBACK OPT_SPECIFY_HANDLER` in a 68000 build to enumerate
+every masked opcode site, then fix the intercepts that depend on masked semantics.
+
+Rollback executed: m68kconf.h + mac_emulator.c reverted, 68000 build rebuilt (0x260ef0,
+40% free), flashed, Finder boots again (`FinderName="Finder"` at t=73s, SPEED 71–83%).
+
+Build gotchas found along the way (keep for future regenerations):
+- `components/musashi/m68kops.c` is **gitignored** — regeneration replaces the working-tree
+  copy, which is the only place the `EXT_RAM_BSS_ATTR` on the two big tables lives. Without
+  it the link overflows `.dram0.bss` by ~434KB. Fixed at the source: the attribute now sits
+  in tracked `m68k_in.c` (TABLE_HEADER section) so every regeneration carries it.
+- `m68kmake` does not read `m68kconf.h`; generated ops are config-independent (`#if` guards
+  select at compile time). A conf flip alone does not require regeneration.
+- CLAUDE.md's claim that ops files are "committed" is wrong; fix the wording if it matters.
 
 ## Phase 2 — 68030 mode + LC II ROM (the big lever)
 
