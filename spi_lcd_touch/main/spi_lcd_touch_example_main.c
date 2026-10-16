@@ -19,7 +19,7 @@
 #include "lvgl.h"
 
 #if CONFIG_EXAMPLE_LCD_CONTROLLER_ILI9341
-#include "esp_lcd_ili9341.h"
+#include "esp_lcd_st7796.h"
 #elif CONFIG_EXAMPLE_LCD_CONTROLLER_GC9A01
 #include "esp_lcd_gc9a01.h"
 #endif
@@ -250,7 +250,7 @@ void app_main(void)
     };
 #if CONFIG_EXAMPLE_LCD_CONTROLLER_ILI9341
     ESP_LOGI(TAG, "Install ILI9341 panel driver");
-    ESP_ERROR_CHECK(esp_lcd_new_panel_ili9341(io_handle, &panel_config, &panel_handle));
+    ESP_ERROR_CHECK(esp_lcd_new_panel_st7796(io_handle, &panel_config, &panel_handle));
 #elif CONFIG_EXAMPLE_LCD_CONTROLLER_GC9A01
     ESP_LOGI(TAG, "Install GC9A01 panel driver");
     ESP_ERROR_CHECK(esp_lcd_new_panel_gc9a01(io_handle, &panel_config, &panel_handle));

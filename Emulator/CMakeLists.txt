@@ -7,8 +7,11 @@ cmake_minimum_required(VERSION 3.5)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 set(EXTRA_COMPONENT_DIRS 
-    managed_components
-    components/LCD
+    components/lcd
 )
+
+add_compile_definitions(ESP_PANEL_KCONFIG_IGNORE=1)
+add_compile_definitions(ESP_PANEL_CONF_PATH=${CMAKE_SOURCE_DIR}/ESP_Panel_Conf.h)
+add_compile_definitions(ESP_PANEL_SUPPORTED_BOARD_PATH=${CMAKE_SOURCE_DIR}/ESP_Panel_Board_Custom.h)
 
 project(68KEmulator)

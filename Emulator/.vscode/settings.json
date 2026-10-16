@@ -6,8 +6,16 @@
     ],
     "idf.toolsPathWin": "C:\\Users\\pablo.daza\\.espressif",
     "files.associations": {
-        "lcd.h": "c",
-        "esp_panel_library.h": "c"
+        "lcd.h": "cpp",
+        "esp_panel_library.h": "cpp",
+        "*.tcc": "cpp",
+        "esp_panel.h": "cpp",
+        "st7701.h": "cpp",
+        "esp_panel_conf.h": "cpp",
+        "esp_panel_board_custom.h": "cpp",
+        "esp_panel_board_supported.h": "cpp",
+        "chrono": "cpp",
+        "typeinfo": "cpp"
     },
     "files.exclude": {
         "**/build": true

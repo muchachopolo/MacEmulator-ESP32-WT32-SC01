@@ -1,8 +1,4 @@
-//#include "driver/spi_master.h"
-
-#ifndef WT32_SC01_H
-    #define WT32_SC01_H
-
+#ifndef CONFIG_WT32_SC01_H
     // SPI LCD Pins
     /*#define WT32_LCD_HOST          HSPI_HOST
     #define TFT_MISO               -1
@@ -19,3 +15,5 @@
     */
     // Function declarations
 #endif
+
+void lcd_init(void);

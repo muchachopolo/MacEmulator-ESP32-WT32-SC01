@@ -1,9 +1,17 @@
 dependencies:
   espressif/esp32_display_panel:
-    dependencies: []
+    component_hash: c20d5769b31b7771be10eaa7235a0a4b4400f3f5d6ef99fc11b17b4c53c16cca
+    dependencies:
+    - name: espressif/esp32_io_expander
+      registry_url: https://components.espressif.com
+      require: public
+      version: ^0.1.0
+    - name: idf
+      require: private
+      version: '>=5.1'
     source:
-      path: D:\Personal\Macintosh\Emulator\managed_components\espressif__esp32_display_panel
-      type: local
+      registry_url: https://components.espressif.com/
+      type: service
     version: 0.2.1
   espressif/esp32_io_expander:
     component_hash: c153d044e1b25bc5e4804b4d9516a623bca524188d13151cbf10e92e3a9cda02
@@ -12,7 +20,7 @@ dependencies:
       require: private
       version: '>=5.1'
     source:
-      registry_url: https://components.espressif.com/
+      registry_url: https://components.espressif.com
       type: service
     version: 0.1.0
   idf:
@@ -20,16 +28,16 @@ dependencies:
       type: idf
     version: 5.3.2
   lvgl/lvgl:
+    component_hash: d7c1ac037ae6e85d94897f807d6e7ba0946a83e720074fc95a4f6241da9f9f53
     dependencies: []
     source:
-      path: D:\Personal\Macintosh\Emulator\managed_components\lvgl__lvgl
-      type: local
+      registry_url: https://components.espressif.com/
+      type: service
     version: 8.4.0
 direct_dependencies:
 - espressif/esp32_display_panel
-- espressif/esp32_io_expander
 - idf
 - lvgl/lvgl
-manifest_hash: ded39b6d3144ae40d65d16a82d2f05577dfa996b7508c3a541c0305c1cff1ff4
+manifest_hash: 05b4c136784cff3baac41b655b414d094a49eaf3f493f4f6ce5631295c17a50d
 target: esp32
 version: 2.0.0
