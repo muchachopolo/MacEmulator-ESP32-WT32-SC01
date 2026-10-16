@@ -4,5 +4,8 @@
     "idf.openOcdConfigs": [
         "board/esp32-wrover-kit-3.3v.cfg"
     ],
-    "idf.toolsPathWin": "C:\\Users\\pablo.daza\\.espressif"
+    "idf.toolsPathWin": "C:\\Users\\pablo.daza\\.espressif",
+    "files.associations": {
+        "lcd.h": "c"
+    }
 }
