@@ -1,9 +1,0 @@
-menu "WT32-SC01 Board Configuration"
-    config WT32_SC01_ENABLE_LCD
-        bool "Enable LCD"
-        default y
-    config WT32_SC01_ENABLE_TOUCHSCREEN
-        bool "Enable Touchscreen"
-        default y
-    endmenu
-    

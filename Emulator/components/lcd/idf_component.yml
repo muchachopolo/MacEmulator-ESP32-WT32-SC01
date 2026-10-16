@@ -1,4 +1,0 @@
-dependencies:
-  idf: '>=5.3'
-  lvgl/lvgl: ^8.4.0
-  espressif/esp32_display_panel: ^0.2.1

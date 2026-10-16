@@ -1,0 +1,14 @@
+menu "Macintosh Emulator Configuration"
+    menu "Device Config"
+        choice ESP32_DEVICE_SELECTED
+            default WT32_SC01_H
+            prompt "Select the device"
+            config WT32_DEVICE_NONE
+                bool "Select a supported device"
+            config WT32_SC01_H
+                bool "Wireless-Tag WT32-SC01 - SPI - 16MB Flash / 8MB PSRAM"
+                help
+                    WT32-SC01-3.4 with ESP32-WROVER-B, ST7796 LCD, FT5x06 touch.
+        endchoice
+    endmenu
+endmenu

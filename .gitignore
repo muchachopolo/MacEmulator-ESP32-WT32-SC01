@@ -1,2 +1,25 @@
+# Build artifacts
 **/build/
 **/managed_components/
+**/sdkconfig.old
+
+# ROM and disk images (copyrighted, not redistributable)
+ROM/
+
+# Reference source archives and extracted dirs
+minivmac-master/
+minivmac-master.zip
+MinivMac-main.zip
+snow-master/
+snow-master.zip
+
+# Python
+__pycache__/
+*.pyc
+
+# Temp/debug files
+stderr.txt
+DebugLogs.txt
+
+# Claude Code local state
+.claude/
