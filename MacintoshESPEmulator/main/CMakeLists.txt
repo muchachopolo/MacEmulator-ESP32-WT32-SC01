@@ -1,8 +1,8 @@
 # Embed ROM and disk images from the ROM directory
 set(ROM_DIR "${CMAKE_SOURCE_DIR}/../ROM")
 
-# Required: Classic.ROM
-set(EMBED_FILES "${ROM_DIR}/Classic.ROM")
+# Required: LC-II.ROM (68030, Phase 2)
+set(EMBED_FILES "${ROM_DIR}/LC-II.ROM")
 
 # Optional: disk image
 set(HAS_DISK_IMAGE 0)

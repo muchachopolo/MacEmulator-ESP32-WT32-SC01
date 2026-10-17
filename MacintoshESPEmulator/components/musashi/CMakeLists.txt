@@ -8,7 +8,7 @@
 
 # Register the component first (required for ESP-IDF build system)
 idf_component_register(
-    SRCS "m68kcpu.c" "m68kops.c"
+    SRCS "m68kcpu.c" "m68kops.c" "softfloat/softfloat.c"
     INCLUDE_DIRS "."
     REQUIRES log
 )

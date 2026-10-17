@@ -4,8 +4,11 @@ Spec written 2026-10-16. Purpose: durable plan so a future session can resume wi
 re-deriving context. Update the Status line and tick boxes as work lands.
 
 Status: Phase 0 done (2026-10-16). Phase 1 attempted and rolled back (2026-10-16) — 68020
-mode crashes the Classic-ROM boot; root cause recorded in Phase 1 below. Working tree is
-back on the 68000 build. Phase 2 not started.
+mode crashes the Classic-ROM boot; root cause recorded in Phase 1 below. Phase 2 IN PROGRESS
+(2026-10-16): build switched to 68030 + LC II ROM, boots to the boot block but the System-file
+load fails and it crashes at F2007 in SWIM space — LC II ROM needs its own bypass set; state
+recorded in Phase 2 below. NOTE: working tree + flashed binary are the Phase-2 (broken) config;
+the last fully working build is at commit c9abaef (68000 + Classic).
 
 ## Baseline (as of 2026-10-16)
 
@@ -110,19 +113,19 @@ What was done: `M68K_EMULATE_020 OPT_ON` + `M68K_CPU_TYPE_68020`, ops regenerate
 built (0x26e8d0, 38% free), flashed. Boot crashed: `CRASH DETECTED F918: PC=$4E2010`
 inside `_InitFonts`; device showed the Welcome banner with no progress bar.
 
-Root cause — the executed Classic-ROM boot paths contain **68020-only addressing modes**
-that 68000 mode was silently masking:
-- `LEA disp(PC),A0` at $41A028 (resource-handler table setup) — PC-relative EA is 020.
-- `MOVE.W disp(A7),-(A7)` at $41A006 (PACK GetRes call site) — disp(A7) is 020.
-In 68000 mode these raised exception 1010, handled by a ROM handler that is NOT the
-$400768 UNIMP stub — which is why the UNIMP-TRAP counter read 0 in both boots. The
-address-pinned boot bypasses (SCSI counters $41A44A, ADB polling $08446C, DM traps,
-SEC-RD, BOOT3 markers) were derived empirically against that masked flow. With real
-020 semantics the flow diverges: BOOT3-F633..F642 all fire inside the SCSI polling
-loop, the ROM writes garbage clock bytes (BD-WRITE $0210←00/$0211←01 vs Finder's 80/23),
-an extra 0x28 word lands on the stack at TRAP so GetRes reads type=40 and name='??PA'
-instead of 'PACK', and _InitFonts dies. Disk I/O (DM-READ #0..#16) was byte-identical —
-the divergence is purely instruction semantics.
+What actually diverged — **cycle timing**, not semantics at the sites first blamed.
+`MOVE.W $C(A7),-(A7)` ($41A006, `3F2F 000C`) and `LEA $419FFE(PC),A0` ($41A028,
+`41FA FFD4`) are plain 68000 modes (`d16(A7)`, `d16(PC)`) — they execute identically
+in both builds, so they are NOT the cause (earlier claim was wrong; corrected here).
+The 020-mode cycle table costs some instructions differently, and the boot bypasses
+are timing-tuned: under 020 timing the SCSI countdown (DBF loop at $41A84A, MULU
+#$0113) swallows the BOOT3-F633..F642 markers, the ADB clock read fails (BD-WRITE
+$0210←00/$0211←01 vs Finder's 80/23), and the flow diverges upstream of the PACK
+GetRes — an extra 0x28 word on the stack makes the intercept read type=40, name='??PA'.
+Disk I/O (DM-READ #0..#16) stayed byte-identical.
+Open question: whether any genuinely 020-only instruction (indexed EA, CALLM/RTM,
+loop ops) executes in the boot path at all. The cheap probe answers it: `M68K_ILLG_HAS_CALLBACK
+OPT_SPECIFY_HANDLER` in a 68000 build, log opcode+PC per illegal opcode.
 
 Consequence: Phase 1 needs the same intercept re-derivation discipline as Phase 2 step 4,
 against the Classic ROM's true 020 flow — not a two-line flip. Cheap next attempt if
@@ -165,6 +168,41 @@ Done when: Finder boots on LC II ROM, all intercepts re-proven, SPEED > current.
 Risks: this is the highest-risk step in the whole roadmap — a wrong intercept address
 reproduces the known F5251+/SCSI-range crash. Keep the Phase-1 build in git as the
 rollback point. Budget: 030 tables larger than 020; re-check `size` and PSRAM.
+
+### Phase 2 attempt 1 (2026-10-16) — build switched, boot fails, WIP committed
+
+Build switch (all committed):
+- `main/CMakeLists.txt`: EMBED_FILES → LC-II.ROM (512KB, same $400000-$43FFFF map).
+- `mac_emulator.c`: embed symbols → `_binary_LC_II_ROM_start/end`; CPU type → 68030.
+- `m68kconf.h`: 020 AND 030 both OPT_ON (030 is a superset; the generated ops gate the
+  040-FPU opcodes with a runtime `CPU_TYPE_IS_030_PLUS`, so enabling 030 makes the ops
+  table reference `m68040_fpu_op0/1` → `m68kfpu.c` + `softfloat/softfloat.c` must link).
+- `components/musashi/CMakeLists.txt`: added `softfloat/softfloat.c` to SRCS. Binary 2.46MB
+  (+82KB vs 68000), 60% free in the 4MB app partition. No PSRAM-table change (fixed size).
+
+Boot observation (Classic-pinned intercepts still in place, LC II ROM embedded):
+- ROM self-test passes naturally (BOOT2-KEY: BoxFlag=0, MachByte=0 — the LC II ROM doesn't
+  set the Classic's low-mem markers; UNIMP read at $400768 = $00000000, different code there).
+- Boot block runs: BOOT3-F633..F642 fire with RAM PCs ($2F1C-$3A1A, SP $2600) — boot block +
+  early System code executing. Boot crawls at 17-23% (memory test + SCSI countdowns NOT
+  bypassed on this ROM).
+- System-file load FAILS: at F2000 all low-mem globals zero (MemTop/BufPtr/ScrnBase/StkBase/
+  HeapEnd), trap table zero=256, "12 critical Toolbox traps UNIMPLEMENTED", OS[$6A] HUnlock
+  = $00000000 UNIMP. FinderName="" then CRASH F2007: PC=$C95BC9 (SWIM/IWM space) SP=$002604.
+- No DM-READ/DM-CTL/DM-STAT/SEC-RD lines ever fired — the LC II ROM's Device Manager disk
+  code lives elsewhere; the boot block's floppy reads diverge and PC jumps into SWIM space.
+
+Next steps for a future session (the LC II ROM needs its OWN bypass set, derived by
+disassembly against LC-II.ROM, same as Phase 2 step 4):
+1. Find the LC II ROM's sector-read/Device Manager routines (the equivalents of $40315C/$4031BE/
+   $4031CC/$4031E0/$4031EE and $4357F4) — hunt for the .SONY request/complete loop pattern with
+   dis68k.py over LC-II.ROM; the boot block got far enough that the disk controller is the
+   immediate blocker.
+2. Memory-test + SCSI-countdown bypass equivalents (boot speed 17-23% shows they're inactive).
+3. UNIMP handler + checksum/RAM-test patch equivalents (LC II ROM's $400768 area is not the
+   UNIMP stub; find its illegal-instruction handler).
+4. The emulator's OS-trap-table / Toolbox checks read Classic low-mem locations — verify they
+   read OS-version-dependent (7.5.3) addresses, not ROM-dependent ones.
 
 ## Phase 3 — Native intercepts for hot routines
 

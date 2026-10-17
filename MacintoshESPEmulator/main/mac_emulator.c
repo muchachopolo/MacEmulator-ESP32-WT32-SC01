@@ -25,8 +25,8 @@
 static const char *TAG = "mac_emu";
 
 /* Embedded ROM image (linked from flash via CMake EMBED_FILES) */
-extern const uint8_t rom_start[] asm("_binary_Classic_ROM_start");
-extern const uint8_t rom_end[]   asm("_binary_Classic_ROM_end");
+extern const uint8_t rom_start[] asm("_binary_LC_II_ROM_start");
+extern const uint8_t rom_end[]   asm("_binary_LC_II_ROM_end");
 
 /* Disk image - only available if HAS_DISK_IMAGE is set in CMakeLists.txt */
 #if HAS_DISK_IMAGE
@@ -162,7 +162,7 @@ bool mac_emu_init(void)
 
     /* Initialize Musashi 68000 CPU */
     m68k_init();
-    m68k_set_cpu_type(M68K_CPU_TYPE_68000);
+    m68k_set_cpu_type(M68K_CPU_TYPE_68030);
     m68k_pulse_reset();
 
     ESP_LOGI(TAG, "CPU initialized, PC=0x%08X, SP=0x%08X",
