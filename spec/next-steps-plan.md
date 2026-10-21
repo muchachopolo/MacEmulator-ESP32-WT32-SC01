@@ -45,11 +45,11 @@ Windows `serial_watch` python processes before flashing (they hold the COM port)
 
 - [x] 1a. `M68K_INLINE_RAM OPT_OFF` (done 2026-10-21): about 16% fewer exec cycles at LC II
       Finder idle (3846M → ~3200M per 300 frames). Keep OFF on the ESP32.
-- [ ] 1b. `M68K_INLINE_FETCH` on vs off.
-- [ ] 1c. `MUSASHI_HOT_IRAM` (CMake var, `hot_iram.lf`, ~17 KB IRAM). Trim the list if IRAM
+- [x] 1b. `M68K_INLINE_FETCH` OFF: −8% exec cycles (4560M → 4182M), Finder 246 → 227 s. Now OFF.
+- [x] 1c. `MUSASHI_HOT_IRAM` ON: **−49%** (4560M → 2307M), Finder 246 → 172 s. Now ON (IRAM 75 KB used, 56 KB free with everything). Was: `MUSASHI_HOT_IRAM` (CMake var, `hot_iram.lf`, ~17 KB IRAM). Trim the list if IRAM
       overflows.
-- [ ] 1d. `MAC_MEM_CALLBACK_IRAM=1` (~2 KB IRAM).
-- [ ] 1e. `M68K_OP_INDEX` (16-bit opcode index in PSRAM, handler/cycle tables in DRAM).
+- [x] 1d. `MAC_MEM_CALLBACK_IRAM=1`: −9% (4162M), Finder 212 s. Now ON.
+- [x] 1e. `M68K_OP_INDEX`: only −3% (4426M, run had touches), costs 128 KB PSRAM + 10 KB DRAM → left OFF; retest on top of hot IRAM later. Was: `M68K_OP_INDEX` (16-bit opcode index in PSRAM, handler/cycle tables in DRAM).
 - [ ] 1f. `TOUCH_SAMPLER_TASK` 1 vs 0 (feel, and video fps while touching).
 - [ ] 1g. Verify touch on the board: 1:1 tracking, no overshoot, slow nudge, tap, tap-then-drag,
       double-tap. LC II and Classic.
@@ -58,10 +58,22 @@ Windows `serial_watch` python processes before flashing (they hold the COM port)
 - [ ] 1i. Colour byte order on the panel (palette is byte-swapped for esp_lcd; panel uses BGR
       element order, untested in colour). Set the LC II to 256 colours in Monitors and check the
       Apple-menu/happy-Mac colours.
+- [ ] 1k. Idle fast-forward + throttle + V8 cycle scale (host-verified 2026-10-21, see CLAUDE.md
+      "Performance Optimizations" 6-8). On the board: Finder idle should reach ~100% SPEED with
+      `IDLE-FF:` ~60-85% skipped; check that the throttle holds 60 fps (no faster), touch/cursor
+      feel, menu/drag, video fps. A/B `MAC_IDLE_FF=0` and `MAC_V8_CYCLE_SCALE=1`. Note that SPEED %
+      and "exec cycles per 300 frames" change meaning with both (fewer CPU cycles per frame).
 - [ ] 1j. **Decision:** compare wall-clock (boot-to-Finder seconds, open a folder, open a menu)
       for Classic vs LC II at 1-bit. If LC II is within ~20%, it is the single build. Otherwise
       Classic is the main build and LC II is the optional colour build. Record the numbers in
       `spec/performance-roadmap.md`.
+
+**Board result 2026-10-21 (LC II, all winners + idle fast-forward + V8 cycle scale 2 + clock/IRQ
+fixes):** boot-to-Finder **115 s** (was 246 s this morning); Finder idle **100% real-time** at the
+60 fps throttle with 60-65% of CPU cycles skipped by fast-forward (from ~F9000, after the
+Finder finishes its startup work). A/B method: `scratchpad/ab_round.sh`-style loop (build, flash,
+watcher, Finder + 10 PROFILE lines, median), run from a clean `git worktree` so concurrent
+agent edits can't leak in; abort on "Hash of data verified" missing.
 
 ## Step 2 — Input completeness (~half day)
 
@@ -74,16 +86,41 @@ Windows `serial_watch` python processes before flashing (they hold the COM port)
 - [ ] PRAM persistence (Egret PRAM 256 B → NVS) so Mouse tracking, Monitors depth and the
       startup disk survive power-off.
 
+## Step 2b — Bugs found 2026-10-21 (small)
+
+- [x] LC II clock frozen (fixed 2026-10-21, host): the Egret/Cuda HLE now sends the MCU's
+      unsolicited 1 Hz tick packet [03][00][00] (ROM unsolicited path: LC II $A14A88 ->
+      $A14BE2, Cuda $AD026A -> Lvl1DT[0] = $A0B140 ADDQ.L #1,Time). Starts after
+      SET_ONE_SECOND_MODE ($1B): Egret while autopoll is on, Cuda when mode != 0.
+      Time now +1 per 60 frames on LC II and Color Classic (was frozen). Switch
+      `EGRET_ONE_SEC_TICKS` (default 1).
+- [x] Classic spurious interrupts (fixed 2026-10-21, host): `via_update_irq()` drives the
+      level-1 line immediately on Classic too (`CLASSIC_VIA_IRQ_NOW`, default 1, in
+      mac_emulator.h). Host: level-1 entries 14.0 -> 1.2 /frame (boot 9.8 -> 1.1); Finder
+      idle 3744 -> 3629 instr/frame, 49.2k -> 45.7k cycles/frame. **A/B on the board.**
+
 ## Step 3 — Native acceleration (the "native OS" track)
 
 Principle: do not rewrite Mac OS. Replace the hottest pieces with native C, guided by
 measurement, and verify every replacement byte-for-byte on the host harness.
 
-- [ ] 3a. **Profiling (cheap, host).** Add a trap histogram (A-line dispatch: trap word →
-      count and cycles until return) and a ROM/System-code routine histogram to the host harness.
-      Workloads: boot, Finder idle, open a window, drag a window, menu, list view. Output: top 20
-      traps/routines by cycle share, for both builds.
-- [ ] 3b. **Native trap replacements (Phase 3)** for the top 3–5. Likely: BlockMove/BlockMoveData,
+- [x] 3a. **Profiling (done 2026-10-21, host).** `host/host_prof.c` (`make TRACE=1`,
+      `--profile-from/--profile-to/--profile-out`, `--vclock`); reports in `host/prof_results/`.
+      Findings: Finder idle is ~90% inside _WaitNextEvent (Process Manager sleep loop:
+      OSEventAvail + trap $ABF7 + PPC $A0DD, ~390 instr/pass, 54 passes/frame on LC II, 20 on
+      Classic). Window drag is ~97% a 2-instruction Ticks wait (`CMP.L Ticks,D0 / BHI`; LC II
+      $A193E8, Classic $40C5C2). Menus: ~38% MenuSelect, GetResource lookups. Boot: resource
+      load/decompress (Get1Resource 22-45% self). Drawing traps (CopyBits, FillRect, text,
+      BlockMove) are each <0.5% → **not** worth native replacement yet. The trap dispatcher is
+      15-17% of all instructions. **LC II runs ~2× instructions per frame vs Classic**
+      (20.8k vs 10.2k) because 68030 cycle timings are ~half at the same 130,560 cycles/frame.
+- [ ] 3a′. **New top priority (from 3a):** (1) idle fast-forward: end the frame early when the
+      Mac is provably waiting (null-event polling within one tick, Ticks wait loops), with a
+      60 fps real-time throttle; (2) LC II per-frame cycle budget scaled to match the Classic's
+      instruction rate per tick; (3) native A-line trap dispatcher; (4) native resource
+      decompression and GetResource lookup; (5) handle traps (HLock/HUnlock/HGetState/
+      HSetState). Items 1-2 in progress 2026-10-21 (agent, host-first).
+- [ ] 3b. **Native trap replacements (Phase 3)**: per 3a, start with the trap dispatcher, dcmp, resource lookup and handle traps (drawing traps are cold). Original guess was BlockMove/BlockMoveData,
       CopyBits/bit blits, FillRect/PaintRect/region fills, memory manager (NewPtr/NewHandle/
       SetHandleSize), text drawing (StdText/DrawChar). Mechanism: intercept at the A-trap
       dispatcher or the RES-TRAP trampoline. A C handler works on `ram[]`/VRAM with big-endian
