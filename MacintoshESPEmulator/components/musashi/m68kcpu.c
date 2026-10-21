@@ -1021,6 +1021,14 @@ int m68k_execute(int num_cycles)
 		m68ki_check_bus_error_trap();
 #endif
 
+#ifdef M68K_SLICE_START_HOOK
+		/* Native loop accelerators (mac_native.c): the hook returns the
+		 * number of instructions it ran (0 = none). If it ran any, the
+		 * loop below continues only while cycles remain, exactly as the
+		 * do-while would after those instructions; if it ran none, the
+		 * do-while runs as before (at least one instruction). */
+		if(!M68K_SLICE_START_HOOK() || GET_CYCLES() > 0)
+#endif
 		/* Main loop.  Keep going until we run out of clock cycles */
 		do
 		{

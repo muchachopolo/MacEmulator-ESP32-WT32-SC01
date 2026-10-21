@@ -2039,6 +2039,11 @@ static inline void m68ki_exception_1010(void)
 					 m68ki_disassemble_quick(ADDRESS_68K(REG_PPC))));
 #endif
 
+#ifdef M68K_ALINE_PRE_HOOK
+	/* Native replacement entered through a patched A-line word (mac_native.c) */
+	if (M68K_ALINE_PRE_HOOK(REG_IR))
+		return;
+#endif
 #ifdef M68K_ALINE_HOOK
 	M68K_ALINE_HOOK(REG_IR, REG_PPC);
 #endif
@@ -2048,6 +2053,10 @@ static inline void m68ki_exception_1010(void)
 
 	/* Use up some clock cycles and undo the instruction's cycles */
 	USE_CYCLES(CYC_EXCEPTION[EXCEPTION_1010] - CYC_INSTRUCTION[REG_IR]);
+#ifdef M68K_ALINE_POST_HOOK
+	/* Frame built, REG_PC = A-line vector target (mac_native.c) */
+	M68K_ALINE_POST_HOOK();
+#endif
 }
 
 /* Exception for F-Line instructions */

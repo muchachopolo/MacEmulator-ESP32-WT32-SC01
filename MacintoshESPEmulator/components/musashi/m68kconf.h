@@ -38,6 +38,50 @@ extern void mac_reset_handler(void);
 extern void mac_aline_hook(unsigned int trap_word, unsigned int trap_pc);
 #define M68K_ALINE_HOOK(IR, PPC)    mac_aline_hook(IR, PPC)
 
+/* Native A-line trap dispatcher (mac_native.c, plan step 3b). Runs the
+ * known trap dispatchers (Classic System 7 RAM dispatcher, LC II ROM
+ * $A099B0) as C with Musashi-exact semantics, memory accesses and cycle
+ * charges, called on the A-line exception path only. Host-verified
+ * byte-identical (RAM dumps + screenshots) against MAC_NATIVE_TRAPDISP=0. */
+#ifndef MAC_NATIVE_TRAPDISP
+#define MAC_NATIVE_TRAPDISP         1
+#endif
+#if MAC_NATIVE_TRAPDISP
+extern void mac_native_aline(void);
+#define M68K_ALINE_POST_HOOK()      mac_native_aline()
+#endif
+
+/* Native resource decompressor 'dcmp' 3 (mac_native.c): output-exact, but
+ * it runs in zero emulated time, so runs are not cycle-identical to OFF.
+ * MAC_NATIVE_DCMP_CHECK=1 (host only) also runs the 68k original on every
+ * call and compares. DC_TRAP is the A-line word patched over the dcmp's
+ * entry; $A89F is _Unimplemented's own number, never executed on purpose. */
+#ifndef MAC_NATIVE_DCMP
+#define MAC_NATIVE_DCMP             1
+#endif
+#ifndef MAC_NATIVE_DCMP_CHECK
+#define MAC_NATIVE_DCMP_CHECK       0
+#endif
+#define DC_TRAP                     0xA89F
+#if MAC_NATIVE_DCMP
+extern int mac_native_aline_pre(unsigned int ir);
+#define M68K_ALINE_PRE_HOOK(IR)     mac_native_aline_pre(IR)
+#endif
+
+/* Native ROM loop accelerators (mac_native.c): long-running ROM loops at
+ * fixed addresses (LC II RAM test, ROM checksum, heap walk, wait loop;
+ * Classic delay loop) run as C when a time slice starts inside them, with
+ * Musashi-exact semantics and per-instruction cycle charges, so the slice
+ * ends on the same instruction as interpreted. Called once per
+ * m68k_execute() (per slice), never per instruction. */
+#ifndef MAC_NATIVE_LOOPS
+#define MAC_NATIVE_LOOPS            1
+#endif
+#if MAC_NATIVE_LOOPS
+extern int mac_native_slice(void);
+#define M68K_SLICE_START_HOOK()     mac_native_slice()
+#endif
+
 /* Use autovectored interrupts (matches Mac hardware) */
 #define M68K_EMULATE_INT_ACK        OPT_SPECIFY_HANDLER
 #define M68K_INT_ACK_CALLBACK(A)    mac_int_ack_handler(A)
