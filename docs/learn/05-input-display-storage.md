@@ -80,7 +80,7 @@ elements at $C0/$D8; mirroring the ROM's own path removed that special case.
 
 ### Game mode
 
-Full-screen games such as a full-screen game own no windows. System 7's Process
+Full-screen games own no windows. System 7's Process
 Manager sends a `mouseDown` to the layer under the point. With no game window
 there, that is the Finder's layer, so a tap **switched the game out**: it
 looked as if the game had frozen or vanished.

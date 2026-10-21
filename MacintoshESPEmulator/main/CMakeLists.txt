@@ -22,7 +22,7 @@ endif()
 # the flash budget, ~2.89 MB: app partition 0x3F0000 minus code and ROM).
 # custom_753.dsk = 2880K image from tools/build_disk.py.
 # Falls back to the plain System 7.5.3 boot floppy if the custom disk has not
-# been built (tools/make_custom_disk.sh).
+# been built (tools/build_disk.py).
 set(DISK_NAME "custom_753.dsk")
 if(NOT EXISTS "${ROM_DIR}/${DISK_NAME}" AND EXISTS "${ROM_DIR}/OS_750_boot.dsk")
     message(STATUS "${DISK_NAME} not found - falling back to OS_750_boot.dsk")

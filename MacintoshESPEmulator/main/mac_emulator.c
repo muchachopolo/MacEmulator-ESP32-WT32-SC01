@@ -112,14 +112,14 @@ static inline void wr16(uint8_t *r, uint32_t a, uint16_t v)
 }
 
 /* ==== Touch "game mode" (TOUCH_GAME_MODE, default 1) ====
- * Full-screen games that draw straight to the screen (a full-screen game) own no
+ * Full-screen games that draw straight to the screen own no
  * windows. A mouseDown event from them is routed by System 7's Process
  * Manager to the layer under the point -- the Finder's -- which switches the
  * game out. While such an app is in front, a tap sets the button state
  * (MBState $0172, read by _Button; VIA PB3 on the Classic) and posts its
  * mouseDown/mouseUp with evtQWhere in the menu bar (v=1, h=Mouse.h), which
  * the Process Manager leaves to the front app. (A state-only click is not
- * enough: a full-screen game polls GetNextEvent, never _Button, for start and
+ * enough: such games may poll GetNextEvent, never _Button, for start and
  * fire.) The cursor position (Mouse/RawMouse/MTemp) is unchanged. Apps with
  * any window (Finder, DAs, dialogs, SimpleText ...) get normal events.
  * Detection: low-memory globals are swapped per process, so at frame end

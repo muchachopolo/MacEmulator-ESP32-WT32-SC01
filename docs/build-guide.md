@@ -127,7 +127,7 @@ python3 tools/build_disk.py ROM/OS_750_boot.dsk --hd "/path/System 7.5.3 HD.dsk"
 - `--include WindowShade`: optional, because its INIT corrupts memory on the
   Classic build (General Controls then crashes). It works on the LC II.
 
-The project's own disk (System 7.5.3 essentials + a full-screen game + a full-screen game with silenced sounds) is reproduced from your own source images by `tools/make_custom_disk.sh HD_IMAGE CQ_IMAGE POP_APP_IMAGE POP_DATA_IMAGE`. `DISK_NAME "custom_753.dsk"` is already the default (host: `make DISK_NAME=custom_753.dsk
+Keep your own build command (which apps, which exclusions) in a local script next to the images in `ROM/`, which is git-ignored. `DISK_NAME "custom_753.dsk"` is already the default (host: `make DISK_NAME=custom_753.dsk
 BUILD=build_cd`). Any size up to the flash budget mounts through the floppy
 path (.Sony drive 1) on both machines.
 

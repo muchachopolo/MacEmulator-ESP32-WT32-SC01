@@ -109,7 +109,7 @@ fast-forward ([chapter 4](04-performance.md)).
 
 ## 6. Symptoms that meant something else
 
-### The game that "froze": a full-screen game
+### The game that "froze"
 
 Tapping in a full-screen game made the game disappear behind the Finder. It
 looked like a freeze or a crash. It was System 7 working as designed: the

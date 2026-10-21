@@ -160,7 +160,7 @@ int v8_fetch_idx;
 #define CL_DS_SPAN (0x01669 - 0x0155E)
 #if GAME_FULL_SCREENBITS
 /* Full-screen games that centre a fixed 512x342 field on screenBits
- * (a full-screen game: with 480x320 bounds it draws at -16,-11 and loses 16 px
+ * (with 480x320 bounds such a game draws at -16,-11 and loses 16 px
  * left/right and 11 rows top/bottom). While such an app is the current
  * process (CurApName $0910, Pascal string, prefix match), ScrnSize and
  * _ScrnBitMap return the stock 342/512, so its InitGraf sees 512x342. The

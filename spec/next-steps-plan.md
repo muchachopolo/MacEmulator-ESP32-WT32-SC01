@@ -113,9 +113,8 @@ agent edits can't leak in; abort on "Hash of data verified" missing.
       desktop DB, `floppy` profile) → `ROM/custom_753.dsk` 2880K (flash limit ~2.89 MB;
       firmware 0x3DC6A0 of 0x3F0000). `DISK_NAME` build variable (default still OS_750_boot.dsk).
       Large volumes mount through the existing floppy paths (Classic: csCode 6 format list,
-      drive writeProt $80 → read-only). Current user image: System + Finder, Calculator,
-      Key Caps, Shut Down, 7 control panels, SimpleText, a full-screen game, a full-screen game (BW),
-      128K free.
+      drive writeProt $80 → read-only). The user's own image is built locally and never
+      documented or committed.
 - [ ] Open: games want 512×342 and a keyboard (see Step 2); writable disk (PSRAM overlay or
       flash); LC II Monitors cdev says "cannot be used" (V8 video not recognised).
 

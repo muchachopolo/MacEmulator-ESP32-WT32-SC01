@@ -65,9 +65,8 @@ scaled path (with a forced full redraw on each switch). CrsrPin becomes
 0,0,342,512 and touch deltas are scaled by 512/480 × 342/320; leaving the game
 restores the crisp 1:1 view, CrsrPin and the cursor clamp.
 `GAME_FULL_SCREENBITS`: apps listed in `full_screen_apps[]` (`mac_memory.c`,
-CurApName prefix: a full-screen game, a full-screen game) get the stock 512×342 from
-ScrnSize/_ScrnBitMap, because a full-screen game centres its 512×342 field on
-screenBits (with 480×320 it would be cut 16 px left/right and 11 rows
+matched by CurApName prefix) get the stock 512×342 from ScrnSize/_ScrnBitMap,
+because some games centre a fixed 512×342 field on screenBits (with 480×320 it would be cut 16 px left/right and 11 rows
 top/bottom).
 
 ## LC II: native 480×320 colour (`V8_NATIVE_LCD`, default 1)

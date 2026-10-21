@@ -16,7 +16,7 @@ A 68k Macintosh emulator (Musashi CPU core) for the WT32-SC01 v3.4 board
 - **Committed defaults** (user decision 2026-10-21): `ROM_NAME "Classic.ROM"`
   and `DISK_NAME "custom_753.dsk"` in `main/CMakeLists.txt`; CMake falls back
   to `OS_750_boot.dsk` when the custom disk hasn't been built. The disk image
-  itself is never committed — `tools/make_custom_disk.sh` is its recipe.
+  itself and its recipe are local only (`ROM/`, git-ignored).
 - **No `Co-Authored-By` lines** in commit messages.
 - Measure speed as ESP32 exec cycles per 300 frames or wall-clock per task
   (boot-to-Finder seconds), never real-time % across different machines.
@@ -56,8 +56,7 @@ One codebase, two machine targets, picked in `main/CMakeLists.txt`:
 
 `DISK_NAME` (default `custom_753.dsk`, falling back to `OS_750_boot.dsk` if
 absent) selects the disk image in `ROM/`; `DISK_SYM` is its C identifier.
-`custom_753.dsk` (2880K) comes from `tools/build_disk.py`; the project's own
-disk is reproduced by `tools/make_custom_disk.sh` (host harness default stays
+`custom_753.dsk` (2880K) comes from `tools/build_disk.py` (keep your build command locally in `ROM/`; host harness default stays
 LC II + `OS_750_boot.dsk`, see host/README.md). ROM checksums: Classic `A49F9914`, LC II `35C28F5F`,
 Color Classic `ECD99DC0`.
 
@@ -184,7 +183,7 @@ Details: `docs/display-pipeline.md#touch-input`.
   480×320; CrsrPin $0834 becomes 0,0,342,512 and finger deltas are scaled
   ×512/480, ×342/320. Leaving restores CrsrPin and clamps the cursor.
   `GAME_FULL_SCREENBITS`: apps in `full_screen_apps[]` (`mac_memory.c`,
-  CurApName prefix: a full-screen game, a full-screen game) get the stock 512×342
+  matched by CurApName prefix) get the stock 512×342
   from ScrnSize/_ScrnBitMap, so a game that centres its field on screenBits is
   not cut off.
 

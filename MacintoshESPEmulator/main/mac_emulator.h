@@ -55,9 +55,8 @@ extern "C" {
  * touch movement is scaled by 512/480 x 342/320. Leaving game mode returns
  * to the crisp 1:1 480x320 view (mac_emulator.c full_view_track()).
  * GAME_FULL_SCREENBITS (default = GAME_FULL_VIEW): apps whose name starts
- * with an entry of the list in mac_memory.c (a full-screen game, Prince of
- * Persia ...) get the stock 512x342 from _ScrnBitMap / ScrnSize, so a game
- * that centres its fixed 512x342 field on screenBits (a full-screen game) is not
+ * with an entry of the list in mac_memory.c get the stock 512x342 from _ScrnBitMap / ScrnSize, so a game
+ * that centres its fixed 512x342 field on screenBits is not
  * cut off at all four edges. */
 #ifndef GAME_FULL_VIEW
 #define GAME_FULL_VIEW 1
