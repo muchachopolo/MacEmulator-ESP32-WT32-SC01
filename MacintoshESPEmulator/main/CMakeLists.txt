@@ -4,7 +4,8 @@ set(ROM_DIR "${CMAKE_SOURCE_DIR}/../ROM")
 # Required ROM (user-supplied, see README). Classic.ROM = Mac Classic, 68000,
 # 1-bit (default); LC-II.ROM = LC II, 68030 V8 + Egret, colour;
 # Color-Classic.ROM = V8 + Cuda reference build.
-set(ROM_NAME "Classic.ROM")
+#set(ROM_NAME "Classic.ROM")
+set(ROM_NAME "LC-II.ROM")
 set(EMBED_FILES "${ROM_DIR}/${ROM_NAME}")
 if(ROM_NAME STREQUAL "LC-II.ROM" OR ROM_NAME STREQUAL "Color-Classic.ROM")
     set(MAC_ROM_LC_II 1)
