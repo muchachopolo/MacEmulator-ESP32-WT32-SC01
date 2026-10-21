@@ -6,7 +6,7 @@ reassessment", "Video plan"). Update the status checkboxes here as work lands.
 
 ## Current state (2026-10-21)
 
-**Nothing from 2026-10-20/21 is committed.** The last commit is fe6369d. Commit first (step 0).
+Committed and pushed 2026-10-21 on branch `phase2-lc2-native` (4 commits on top of fe6369d); not yet merged into `main`.
 
 | Area | State |
 |---|---|
@@ -27,7 +27,7 @@ Key files added this round: `main/mac_egret.c/.h` (Egret/Cuda HLE + ADB mouse),
 
 ## Step 0 — Housekeeping (do first, ~30 min)
 
-- [ ] Review `git diff --stat` and commit in logical chunks: (a) Musashi fixes
+- [x] Review `git diff --stat` and commit in logical chunks (done 2026-10-21, branch `phase2-lc2-native`): (a) Musashi fixes
       (CPU_TYPE_IS_010_LESS, PMMU stub, bus-error off, inline paths), (b) V8 machine (map,
       overlay, Egret, video, disk, timers), (c) Classic native + VIA model, (d) touch, (e) host
       harness, (f) docs/spec. Do not commit `board_test/sdkconfig` noise, `tools/*_out.txt` or
