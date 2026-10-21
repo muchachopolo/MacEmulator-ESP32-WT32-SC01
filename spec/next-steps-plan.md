@@ -32,9 +32,7 @@ Key files added this round: `main/mac_egret.c/.h` (Egret/Cuda HLE + ADB mouse),
       overlay, Egret, video, disk, timers), (c) Classic native + VIA model, (d) touch, (e) host
       harness, (f) docs/spec. Do not commit `board_test/sdkconfig` noise, `tools/*_out.txt` or
       `E:PersonalMacintoshtoolsbuild_out.txt`.
-- [ ] Extend `MacintoshESPEmulator/host/.gitignore` to cover the agents' scratch dirs
-      (`build_*/`, `adb_*/`, `fd_*/`, `vid_*/`, `nat_*/`, `perf_*/`, `tch_*/`, `fin_*/`, `t*/`,
-      `trace*.txt`), then delete them (about 1.5 GB).
+- [x] `host/.gitignore` now tracks only sources; the scratch dirs were deleted (done 2026-10-21).
 - [ ] Optionally remove the dead Start-Manager-alias leftovers and Classic-keyed V8 diagnostics
       (the FIRST-BAD-PC detector misfires on V8 ROM addresses).
 
