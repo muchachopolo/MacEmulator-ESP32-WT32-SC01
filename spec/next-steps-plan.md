@@ -281,12 +281,63 @@ Raspberry Pi 2 Model B (quad Cortex-A7, 1 GB) with the user's AC-TFT35-V2.1 3.5"
 
 ## Step 2e — LC II game full view (in progress 2026-10-21)
 
-- [ ] V8 equivalent of the Classic full view: present 512×384/512×342 to listed
-      full-screen apps (main GDevice/PixMap bounds), render scaled to 480×320;
-      investigate the "error of type 29" quit of a game on the LC II.
+- [x] (host-verified 2026-10-21; board check pending) V8 equivalent of the Classic
+      full view: `V8_GAME_FULL_VIEW` gives listed full-screen apps a 512×342 main
+      GDevice/PixMap at their InitGraf, rendered scaled to 480×320; restored at
+      ExitToShell. See `docs/display-pipeline.md`.
+- [ ] "Error of type 29" on the LC II = `dsNoPk12`: the game calls `_Pack12`
+      (Color Picker, HSL2RGB) when the main screen is ≥ 4 bpp, and the System on
+      the disk has no PACK 12 (only 0, 2, 3, 6, 8; the stock 7.5.3 floppy neither).
+      Not screen-size related. Fix: add the Color Picker extension (PACK 12) to
+      the custom disk, or run that game at 1/2 bpp.
 - [ ] LC II colour: boot in 256 colours (Egret PRAM video mode), make the
       Monitors control panel work with the V8 video emulation, verify the panel's
       colour byte order on the board.
+
+## Step 8 — Exchanging files between the SD card and System 7.5 (planned 2026-10-21)
+
+Goal: move files between a PC and the emulated Mac through the SD card, in both
+directions. Requires Step 6a (SD card access; same code on the Raspberry Pi port,
+Step 7). Three layers, from simplest to most convenient:
+
+- [ ] 8a. **Extra disks from SD image files.** Every `/mac/*.dsk` (or `*.img`,
+      `*.hfs`) on the card can be mounted as an additional, **writable** volume.
+      Simplest path: reuse the existing .Sony hooks with **drive 2** (today it
+      reports "not installed") backed by an SD image file, ejectable/swappable from
+      the Finder; selection via `/mac/config.txt` or a touch menu. On the PC the
+      images are read/written with tools that understand HFS (e.g. Python `machfs`,
+      HFSExplorer, or another Mac emulator). Works for any size up to the HFS limit.
+- [ ] 8b. **Emulated SCSI hard disks.** A real SCSI target on the NCR 5380
+      (Classic $580000, V8 $F10000; register emulation already exists): selection,
+      INQUIRY, TEST UNIT READY, READ CAPACITY, READ(6/10), WRITE(6/10),
+      MODE SENSE, REQUEST SENSE; SCSI IDs 0-6 mapped to image files in
+      `/mac/scsi/`. Needs an Apple partition map + driver on each image (create
+      them once with Apple HD SC Setup inside the emulator, or ship a tool that
+      writes a partition map with an open-source driver). Gives "real" hard
+      disks, larger than 2 GB in total via several volumes, and boot from SCSI.
+- [ ] 8c. **Shared folder ("SD folder as a Mac volume").** The most convenient
+      way: a folder on the card, e.g. `/mac/shared/`, appears in the Finder as a
+      volume; files copied there from the PC show up on the Mac and vice versa,
+      with no image tools. Approach: an **external file system** in the emulator,
+      like Basilisk II's "ExtFS" — hook the File Manager (HFS dispatch) calls for
+      one volume and serve them natively from the FAT folder: directory listing,
+      open/read/write/close, create/delete/rename, GetFileInfo/SetFileInfo.
+      Mac-specific data is kept in sidecar files: the **resource fork** and
+      **type/creator/Finder flags** as AppleDouble (`._name`) or a hidden
+      `.rsrc`/`.finf` folder, so classic apps survive the round trip;
+      file names converted between MacRoman and UTF-8 (31-char HFS limit).
+      Optional helpers on the PC side: a script that converts between
+      MacBinary/.sit downloads and the shared-folder format.
+      This is a larger piece of work (File Manager semantics, FCBs, catalog
+      IDs, Finder caching) — do it after 8a/8b work, host harness first
+      (the harness can map a PC folder the same way for testing).
+- [ ] 8d. **Clipboard / quick transfer (optional).** A tiny bridge for text
+      between the PC and the Mac clipboard (e.g. a `/mac/clipboard.txt` file
+      synced on demand), similar to Mini vMac's ClipIn/ClipOut.
+
+Order: 8a (quick, reuses the floppy path) → 8c (best user experience) → 8b
+(when real SCSI disks or SCSI boot are wanted) → 8d. Wi-Fi upload (Step 6e) can
+write into the same `/mac/` folders.
 
 ## Ground rules
 
