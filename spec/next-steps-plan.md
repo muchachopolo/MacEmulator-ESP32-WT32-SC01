@@ -271,13 +271,12 @@ Steps:
       (`CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP` already set). Off by default.
 - Order: 6a → 6b → 6c and/or 6d → 6e. Pin budget decides 6c vs 6d for input.
 
-## Step 7 — Raspberry Pi 1 bare-metal port (planned 2026-10-21)
+## Step 7 — Raspberry Pi bare-metal port (planned 2026-10-21; hardware: Pi 2 Model B v1.1 + AC-TFT35-V2.1)
 
 Full plan: [`raspberry-pi-port.md`](raspberry-pi-port.md). Run the same core on a
-Raspberry Pi 1 with the user's 3.5" SPI touch shield (likely ILI9486 480×320 +
-XPT2046 resistive touch), booting `kernel.img` from the SD card without an OS
-(Circle framework suggested). Needs from the user: exact Pi model and shield
-model/photo. Shares the ADB keyboard work with Step 6b.
+Raspberry Pi 2 Model B (quad Cortex-A7, 1 GB) with the user's AC-TFT35-V2.1 3.5" shield
+(likely ILI9486/ILI9488 480×320 + XPT2046 resistive touch), booting `kernel7.img` from the SD card without an OS
+(Circle framework suggested). Still to confirm: the shield's controller marking (ILI9486 vs ILI9488). Shares the ADB keyboard work with Step 6b.
 
 ## Step 2e — LC II game full view (in progress 2026-10-21)
 

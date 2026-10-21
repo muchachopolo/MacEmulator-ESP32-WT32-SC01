@@ -22,7 +22,7 @@ Read the chapters in order the first time. Each one builds on the previous.
 | 5 | [Input, display and storage](05-input-display-storage.md) | Touch to mouse (gestures, cursor, clicks, game mode), the display pipeline (dirty strips, lookup tables, DMA), the disk path (embedded image, .Sony hooks, write overlay, custom disks) |
 | 6 | [Lessons learned](06-lessons-learned.md) | Debugging stories: misread opcodes, wrong CPU assumptions, rules that leaked between machines, measurements that lied, symptoms that meant something else |
 | 7 | [The PC host harness](07-host-harness.md) | Hands-on tutorial: build variants, screenshots, scripted touch, memory/disk inspection, tracing a hang, profiling, byte-identical A/B testing |
-| 8 | [How everything boots](08-boot-explained.md) | Diagrams: ESP32 boot (flash layout, bootloader, app start), the emulated Mac boot (overlay, ROM, System, Finder) and where the emulator steps in, the planned Raspberry Pi bare-metal boot |
+| 8 | [How everything boots](08-boot-explained.md) | Diagrams: ESP32 boot (flash layout, bootloader, app start), the emulated Mac boot (overlay, ROM, System, Finder) and where the emulator steps in, the planned Raspberry Pi 2 bare-metal boot |
 
 Short on time? Read chapter 1, then chapter 4. Together they explain why the
 emulator is fast enough to use.

@@ -5,8 +5,8 @@ Turning on the board starts **three different boots**, one inside the other:
 1. the **ESP32** boots its firmware (chip ROM → bootloader → our app);
 2. our app powers on an **emulated Macintosh**, which boots like a real one
    (68k reset → Mac ROM → System 7 → Finder);
-3. (planned) on a **Raspberry Pi 1**, the GPU boots first and then starts our
-   emulator as a bare-metal `kernel.img`.
+3. (planned) on a **Raspberry Pi 2**, the GPU boots first and then starts our
+   emulator as a bare-metal `kernel7.img`.
 
 ```mermaid
 flowchart LR
@@ -157,27 +157,28 @@ places to read the code:
 
 ---
 
-## Part 3 — Planned: the Raspberry Pi 1 bare-metal boot
+## Part 3 — Planned: the Raspberry Pi 2 bare-metal boot
 
 On a Raspberry Pi the **GPU** (VideoCore) starts first; the ARM CPU stays
 asleep until the GPU firmware has loaded our program. There is no operating
-system: `kernel.img` *is* the emulator. See the full plan in
+system: `kernel7.img` *is* the emulator (on a Pi 1 the file is called `kernel.img`). See the full plan in
 [`spec/raspberry-pi-port.md`](../../spec/raspberry-pi-port.md).
 
 ```mermaid
 sequenceDiagram
     participant GPU as GPU (VideoCore)
     participant SD as SD card (FAT)
-    participant ARM as ARM1176 CPU
+    participant ARM as ARM Cortex-A7 (core 0)
     GPU->>SD: on-chip ROM reads bootcode.bin
     GPU->>SD: bootcode.bin loads start.elf + fixup.dat
     GPU->>SD: start.elf reads config.txt
-    GPU->>SD: start.elf loads kernel.img into RAM at 0x8000
+    GPU->>SD: start.elf loads kernel7.img into RAM at 0x8000
     GPU->>ARM: release the ARM from reset at 0x8000
     ARM->>ARM: start-up code: stack, clear BSS,<br/>enable MMU + caches (essential for speed)
     ARM->>ARM: framework init (e.g. Circle): timer, interrupts,<br/>SPI, SD card + FAT, USB
     ARM->>SD: load /mac/Classic.ROM (or LC-II.ROM), open the disk image
     ARM->>ARM: init the 3.5" LCD (ILI9486 over SPI) and touch (XPT2046)
+    ARM->>ARM: start cores 1-2 (display, touch/USB) via mailboxes
     ARM->>ARM: mac_emu_init() → 68k reset → the Mac boots as in Part 2
 ```
 
@@ -187,7 +188,7 @@ The SD card for the Pi:
 SD card (FAT32)
 ├── bootcode.bin, start.elf, fixup.dat   Raspberry Pi firmware
 ├── config.txt                           firmware settings (kernel name, clocks)
-├── kernel.img                           our emulator, built with arm-none-eabi-gcc
+├── kernel7.img                          our emulator, built with arm-none-eabi-gcc
 └── mac/
     ├── Classic.ROM, LC-II.ROM           your ROMs
     ├── custom_753.dsk, *.dsk            your disk images (writable here!)
@@ -198,13 +199,13 @@ SD card (FAT32)
 
 ## The three boots side by side
 
-| | ESP32 board | Emulated Mac | Raspberry Pi 1 (planned) |
+| | ESP32 board | Emulated Mac | Raspberry Pi 2 (planned) |
 |---|---|---|---|
 | First code to run | chip ROM inside the ESP32 | the Mac ROM's reset vector (via the overlay) | GPU on-chip ROM |
 | Loads the next stage from | flash (bootloader at 0x1000) | ROM → boot blocks on the disk | SD card (bootcode.bin → start.elf) |
-| Our code starts at | `app_main()` | — (the Mac runs Apple's code) | `kernel.img` at `0x8000` |
+| Our code starts at | `app_main()` | — (the Mac runs Apple's code) | `kernel7.img` at `0x8000` |
 | Where the "disk" lives | embedded in flash | the disk image, served by our hooks | a file on the SD card |
-| Operating system | FreeRTOS (2 cores) | System 7.5.3 (emulated) | none (bare metal) |
+| Operating system | FreeRTOS (2 cores) | System 7.5.3 (emulated) | none (bare metal, 4 cores) |
 | What you can learn here | XIP flash, caches, partitions | overlay, ROM init, boot blocks, INITs | GPU-first boot, bare-metal start-up, MMU/caches |
 
 Next: re-read [chapter 2](02-emulated-macs.md) for the machines' address maps
