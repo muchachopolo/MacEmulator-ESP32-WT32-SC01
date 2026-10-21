@@ -6,13 +6,6 @@
 # ROM and disk images (copyrighted, not redistributable)
 ROM/
 
-# Reference source archives and extracted dirs
-minivmac-master/
-minivmac-master.zip
-MinivMac-main.zip
-snow-master/
-snow-master.zip
-
 # Python
 __pycache__/
 *.pyc
