@@ -18,6 +18,7 @@
 #include <esp_log.h>
 #include <esp_heap_caps.h>
 #include <esp_attr.h>
+#include <esp_system.h>   /* esp_restart(): Classic Restart */
 
 static const char *TAG = "mac_mem";
 int initgraf_seen = 0;  /* Set when _InitGraf ROM entry is accessed */
@@ -117,26 +118,102 @@ int v8_fetch_idx;
  *   $18FA4 _ScrnBitMap (called by InitGraf for screenBits): baseAddr =
  *          ScrnBase, rowBytes = ScreenRow, bounds 0,0,#342 then BRA into
  *          ScrnSize's #512.          imm word  at $18FB4
- * rowBytes (ScreenRow $0106 = 64) and ScrnBase are unchanged. */
+ * rowBytes (ScreenRow $0106 = 64) and ScrnBase are unchanged.
+ *
+ * Boot screens that do not use those values (hard-wired for 512x342):
+ *   Happy Mac / disk icons: the boot code draws straight into the frame
+ *   buffer at absolute addresses (MOVEA.L #imm,A2), 32x32 cell at x 240,
+ *   y 145 = centred on 512 and 10 px above centre on 342. Moved by -$82
+ *   to x 224, y 143 (centred on 480x320; the LC II ROM uses y 144). The
+ *   cell carries the 50% grey desktop pattern in its margins, so the row
+ *   must keep its parity (odd), and x must stay byte-aligned:
+ *     $00F4A disk icon   #$3FCB5E -> #$3FCADC (long at $00F4C)
+ *     $00F5C disk symbol #$3FCF1F -> #$3FCE9D (long at $00F5E)
+ *     $01188 Mac outline #$3FCB5E -> #$3FCADC (long at $0118A)
+ *     $01196 Mac face    #$3FCCDF -> #$3FCC5D (long at $01198)
+ *   SysError / DSAlert box (System 7 "Welcome to Macintosh", progress bar):
+ *   the default DSAlertRect ($03F8, global) is the constant 64,32,190,480,
+ *   centred on 512; the DSAT items (icon, text, buttons) are drawn at
+ *   absolute local coordinates made for that rect, and the System's
+ *   extension progress bar is placed from DSAlertRect. The default path
+ *   ($4015 5A-7D) is rewritten in place to store 63,16,189,464 (global),
+ *   draw it, set bit 7 as before, then MovePortTo(-16,-1) so the DSAT items
+ *   follow the box (the else path already does MovePortTo(rect.topLeft)):
+ *     $0155A LEA ($03F8).W,A0              (unchanged)
+ *     $0155E TST.B (A0) / BPL else         (was BTST #7,($03F8).W / BEQ)
+ *     $01562 MOVEA.L A0,A2                 (new entry, see $01662)
+ *     $01564 MOVE.L #$003F0010,(A0)
+ *     $0156A MOVE.L #$00BD01D0,4(A0)
+ *     $01572 BSR $401588 (draw)            $01574 BSET #7,(A2)
+ *     $01578 PEA ($FFF0).W  -> (v -1, h -16) $0157C BRA _MovePortTo;RTS
+ *     $0157E else path                     (unchanged)
+ *   The alert-$0D path ($0165A) BSRs to the old store entry $401566 and
+ *   then does MovePortTo(38,70): BSR -> $401562, MovePortTo -> (22,69).
+ * The 32-bit immediates are fetched through m68k_read_immediate_32, so they
+ * are patched there (classic_native_long); the 16-bit table below carries
+ * the same words for consistency. */
 #define CL_NAT_LO  0x18F9A   /* lean-path window [$18F9A, $18FB4] */
 #define CL_NAT_SPAN (0x18FB4 - 0x18F9A)
+#define CL_DS_LO   0x0155E   /* DSAlert window [$155E, $1669] */
+#define CL_DS_SPAN (0x01669 - 0x0155E)
 static inline uint16_t classic_native_word(uint32_t off, uint16_t w)
 {
     switch (off) {
     case 0x0060A: case 0x18F9A: case 0x18FB4: return 0x0140;   /* 320 */
     case 0x0060E: case 0x18FA0:               return 0x01E0;   /* 480 */
+    /* DSAlert default path rewrite (see above) */
+    case 0x0155E: return 0x4A10;   /* TST.B (A0)            */
+    case 0x01560: return 0x6A1C;   /* BPL $40157E           */
+    case 0x01562: return 0x2448;   /* MOVEA.L A0,A2         */
+    case 0x01564: return 0x20BC;   /* MOVE.L #,(A0)         */
+    case 0x01566: return 0x003F;
+    case 0x01568: return 0x0010;
+    case 0x0156A: return 0x217C;   /* MOVE.L #,4(A0)        */
+    case 0x0156C: return 0x00BD;
+    case 0x0156E: return 0x01D0;
+    case 0x01570: return 0x0004;
+    case 0x01572: return 0x6114;   /* BSR $401588           */
+    case 0x01574: return 0x08D2;   /* BSET #7,(A2)          */
+    case 0x01576: return 0x0007;
+    case 0x01578: return 0x4878;   /* PEA ($FFF0).W         */
+    case 0x0157A: return 0xFFF0;
+    case 0x0157C: return 0x6006;   /* BRA $401584           */
+    case 0x01662: return 0xFF00;   /* alert $0D: BSR $401562 */
+    case 0x01666: return 0x0045;   /* MovePortTo(22,69)     */
+    case 0x01668: return 0x0016;
     }
     return w;
 }
+/* 32-bit immediates (offset of the long). Window [$0F4C, $1666]. */
+#define CL_NAT32_LO   0x00F4C
+#define CL_NAT32_SPAN (0x01666 - 0x00F4C)
+static inline uint32_t classic_native_long(uint32_t off, uint32_t v)
+{
+    switch (off) {
+    case 0x00F4C: case 0x0118A: return 0x003FCADC;
+    case 0x00F5E:               return 0x003FCE9D;
+    case 0x01198:               return 0x003FCC5D;
+    case 0x01566:               return 0x003F0010;
+    case 0x0156C:               return 0x00BD01D0;
+    case 0x01666:               return 0x00450016;
+    }
+    return v;
+}
+#define CLASSIC_NATIVE_PATCH32(off, v) \
+    do { if (__builtin_expect((uint32_t)((off) - CL_NAT32_LO) <= CL_NAT32_SPAN, 0)) \
+             (v) = classic_native_long((off), (v)); } while (0)
 #define CLASSIC_NATIVE_PATCH(off, w) \
-    do { if (__builtin_expect((uint32_t)((off) - CL_NAT_LO) <= CL_NAT_SPAN || (off) < 0x610, 0)) \
+    do { if (__builtin_expect((uint32_t)((off) - CL_NAT_LO) <= CL_NAT_SPAN || (off) < 0x610 || \
+                              (uint32_t)((off) - CL_DS_LO) <= CL_DS_SPAN, 0)) \
              (w) = classic_native_word((off), (w)); } while (0)
 #define CLASSIC_NATIVE_PATCH_LEAN(off, w) \
-    do { if (__builtin_expect((uint32_t)((off) - CL_NAT_LO) <= CL_NAT_SPAN, 0)) \
+    do { if (__builtin_expect((uint32_t)((off) - CL_NAT_LO) <= CL_NAT_SPAN || \
+                              (uint32_t)((off) - CL_DS_LO) <= CL_DS_SPAN, 0)) \
              (w) = classic_native_word((off), (w)); } while (0)
 #else
 #define CLASSIC_NATIVE_PATCH(off, w)      do { } while (0)
 #define CLASSIC_NATIVE_PATCH_LEAN(off, w) do { } while (0)
+#define CLASSIC_NATIVE_PATCH32(off, v)    do { } while (0)
 #endif
 
 /* Byte-read helpers for big-endian data */
@@ -758,6 +835,46 @@ static uint16_t read16_dm_spin_rescue(void)
     return rom_word_at(DM_SPIN_LOOP);
 }
 
+/* --- Classic: async .Sony completion (Shut Down / Eject fix) ---------------
+ * The DM intercepts below complete .Sony requests on the spot and return RTS.
+ * For an ASYNC call (trap word in D1 has bit 10 set) the caller expects its
+ * ioCompletion routine to run when the request finishes; the File Manager in
+ * particular issues async driver calls (e.g. _Eject -> Control csCode 7 with
+ * completion $4043A0) and its FS queue only advances from that completion.
+ * Never calling it left _Eject (Finder Special > Shut Down / Restart, and
+ * Eject) waiting forever on ioResult=1 of the FS PB.
+ * Fix: chain the completion like a driver that finishes immediately (IODone
+ * runs the completion before the trap returns). The returned RTS pops the
+ * completion address, the completion runs with A0=PB, D0=ioResult=0 (Z set),
+ * and its RTS lands on ROM $403302 (MOVEQ #0,D0; RTS), which returns to the
+ * trap dispatcher with D0=noErr. Call with A0's PB (a0m) before clearing
+ * ioCompletion; only acts when the PC is at the intercepted entry. */
+#if !MAC_ROM_LC_II
+#define DM_RET_NOERR 0x403302   /* Classic ROM: MOVEQ #0,D0; RTS */
+static void dm_async_complete(uint32_t a0m, uint32_t entry)
+{
+    uint32_t pc = m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF;
+    if (pc != entry && pc != entry + 2) return;          /* not a fetch */
+    if (!(m68k_get_reg(NULL, M68K_REG_D1) & 0x0400)) return;  /* sync */
+    uint32_t compl = READ_LONG(ram, a0m + 0x0C) & 0xFFFFFF;
+    if (!compl) return;
+    uint32_t sp = m68k_get_reg(NULL, M68K_REG_SP) - 8;
+    uint32_t spm = sp & ram_mask;
+    if (spm + 8 > ram_size) return;
+    WRITE_LONG(ram, spm, compl);          /* RTS -> completion routine */
+    WRITE_LONG(ram, spm + 4, DM_RET_NOERR); /* its RTS -> D0=0; RTS */
+    m68k_set_reg(M68K_REG_SP, sp);
+    m68k_set_reg(M68K_REG_SR, (m68k_get_reg(NULL, M68K_REG_SR) & ~0x0F) | 0x04);
+    static int ac_cnt = 0;
+    if (ac_cnt < 30) {
+        ESP_LOGW(TAG, "DM-ASYNC #%d entry=$%06X PB=$%06X compl=$%06X",
+                 ac_cnt, entry, a0m, compl);
+        ac_cnt++;
+    }
+}
+#endif
+/* --- end async .Sony completion --- */
+
 /* Intercept Device Manager _Read handler at $40315C.
  * When PB ioRefNum = -5 (.SONY), fulfill from disk image and return RTS. */
 static uint16_t read16_dm_read(void)
@@ -792,6 +909,9 @@ static uint16_t read16_dm_read(void)
                          dm_cnt, io_buf & 0xFFFFFF, (long)io_off,
                          (unsigned long)io_cnt, (unsigned long)dsize);
             }
+#if !MAC_ROM_LC_II
+            dm_async_complete(a0m, DM_READ_ENTRY);  /* async: run ioCompletion */
+#endif
             ram[a0m+0x0C] = 0; ram[a0m+0x0D] = 0;
             ram[a0m+0x0E] = 0; ram[a0m+0x0F] = 0;
             ram[a0m+0x10] = 0; ram[a0m+0x11] = 0;
@@ -819,6 +939,9 @@ static uint16_t read16_dm_ctl(void)
                          ctl_cnt, csCode, ioRefNum,
                          m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF);
             }
+#if !MAC_ROM_LC_II
+            dm_async_complete(a0m, DM_CTL_ENTRY);  /* async: run ioCompletion */
+#endif
             ram[a0m+0x0C] = 0; ram[a0m+0x0D] = 0;
             ram[a0m+0x0E] = 0; ram[a0m+0x0F] = 0;
             ram[a0m+0x10] = 0; ram[a0m+0x11] = 0;
@@ -856,6 +979,27 @@ static uint16_t read16_dm_stat(void)
                 ram[a0m+0x20] = ram[0x0044]; /* installed */
                 ram[a0m+0x21] = ram[0x0045]; /* sides */
             }
+            if (csCode == 6 && a0m + 0x22 < ram_size) {
+                /* Return Format List: one entry describing the inserted
+                 * image (any size, e.g. a 2880K HFS volume). Without it the
+                 * caller (File Manager, after mounting a non-floppy-sized
+                 * volume) used stale csParam and read past the image. */
+                uint32_t lst = READ_LONG(ram, a0m+0x1E) & ram_mask;
+                uint16_t maxn = READ_WORD(ram, a0m+0x1C);
+                uint32_t blocks = iwm_get_disk_size() / 512;
+                if (maxn >= 1 && blocks && lst + 8 <= ram_size) {
+                    WRITE_LONG(ram, lst, blocks);   /* volume size, blocks */
+                    ram[lst+4] = 0x40;              /* current disk format */
+                    ram[lst+5] = 0;                 /* sectors/track: n/a */
+                    ram[lst+6] = 0; ram[lst+7] = 0; /* tracks: n/a */
+                    ram[a0m+0x1C] = 0; ram[a0m+0x1D] = 1;
+                } else {
+                    ram[a0m+0x1C] = 0; ram[a0m+0x1D] = 0;
+                }
+            }
+#if !MAC_ROM_LC_II
+            dm_async_complete(a0m, DM_STAT_ENTRY);  /* async: run ioCompletion */
+#endif
             ram[a0m+0x0C] = 0; ram[a0m+0x0D] = 0;
             ram[a0m+0x0E] = 0; ram[a0m+0x0F] = 0;
             ram[a0m+0x10] = 0; ram[a0m+0x11] = 0;
@@ -1937,7 +2081,14 @@ IRAM_ATTR unsigned int m68k_read_immediate_32(unsigned int address)
     address &= 0x00FFFFFF;
 
     if (__builtin_expect(!mac_post_boot, 0)) {
+#if !MAC_ROM_LC_II && CLASSIC_NATIVE_LCD
+        uint32_t v = m68k_read_memory_32(address);
+        if (address >= 0x400000 && address < 0x500000)
+            CLASSIC_NATIVE_PATCH32(address & rom_mask, v);
+        return v;
+#else
         return m68k_read_memory_32(address);
+#endif
     }
 
     /* Post-boot: lean RAM read */
@@ -1958,8 +2109,10 @@ IRAM_ATTR unsigned int m68k_read_immediate_32(unsigned int address)
     if (__builtin_expect(address < 0x500000, 1)) {
 #endif
         uint32_t a = address & rom_mask;
-        return ((uint32_t)rom[a] << 24) | ((uint32_t)rom[a+1] << 16) |
-               ((uint32_t)rom[a+2] << 8) | rom[a+3];
+        uint32_t v = ((uint32_t)rom[a] << 24) | ((uint32_t)rom[a+1] << 16) |
+                     ((uint32_t)rom[a+2] << 8) | rom[a+3];
+        CLASSIC_NATIVE_PATCH32(a, v);
+        return v;
     }
 
     return m68k_read_memory_32(address);
@@ -2066,4 +2219,17 @@ void mac_reset_handler(void)
     via_reset();
     scc_init();
     ESP_LOGI(TAG, "CPU RESET instruction executed");
+#if !MAC_ROM_LC_II
+    /* Classic Restart (Finder Special > Restart, or Restart on the "safe to
+     * switch off" screen): the ROM executes RESET and re-enters its start
+     * code. A warm re-boot cannot work here because the boot bypasses are
+     * keyed to frame counts and one-shot state (it ends in Sad Mac
+     * 00000001/0000FFFF), so restart the whole board instead: a cold boot
+     * of the emulator, like power-cycling the Mac. RESET is not executed
+     * during a normal boot, only after mac_post_boot. */
+    if (mac_post_boot) {
+        ESP_LOGW(TAG, "RESTART: Mac executed RESET after boot -> esp_restart()");
+        esp_restart();
+    }
+#endif
 }

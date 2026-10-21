@@ -58,7 +58,7 @@ Windows `serial_watch` python processes before flashing (they hold the COM port)
 - [ ] 1i. Colour byte order on the panel (palette is byte-swapped for esp_lcd; panel uses BGR
       element order, untested in colour). Set the LC II to 256 colours in Monitors and check the
       Apple-menu/happy-Mac colours.
-- [ ] 1k. Idle fast-forward + throttle + V8 cycle scale (host-verified 2026-10-21, see CLAUDE.md
+- [x] 1k. (board-verified 2026-10-21: LC II Finder 115 s, idle 100% real-time, 60-65% skipped; Classic idle 83% skipped) Idle fast-forward + throttle + V8 cycle scale (host-verified 2026-10-21, see CLAUDE.md
       "Performance Optimizations" 6-8). On the board: Finder idle should reach ~100% SPEED with
       `IDLE-FF:` ~60-85% skipped; check that the throttle holds 60 fps (no faster), touch/cursor
       feel, menu/drag, video fps. A/B `MAC_IDLE_FF=0` and `MAC_V8_CYCLE_SCALE=1`. Note that SPEED %
@@ -99,6 +99,26 @@ agent edits can't leak in; abort on "Hash of data verified" missing.
       mac_emulator.h). Host: level-1 entries 14.0 -> 1.2 /frame (boot 9.8 -> 1.1); Finder
       idle 3744 -> 3629 instr/frame, 49.2k -> 45.7k cycles/frame. **A/B on the board.**
 
+## Step 2c — Done 2026-10-21 (Classic polish + custom disk; NOT yet committed)
+
+- [x] Classic boot screens centred on 480×320 (happy Mac icon immediates, welcome/DSAlert rect
+      rewrite at $40155E; shutdown box follows). Remaining 512-constants: sad-Mac screen
+      ($401092), disk-switch alert rect ($4044F8).
+- [x] Classic RTC/PRAM chip (`main/mac_rtc.c`, `CLASSIC_RTC`): no AppleTalk alert (SPConfig $22),
+      real clock, PRAM round-trips; idle FF now skips ~83% on Classic.
+- [x] Classic Shut Down freeze fixed (async .Sony completion routine now called,
+      `dm_async_complete`); Special→Restart = `esp_restart()` cold boot; MBState written as a
+      whole byte ($00/$80) so the shutdown screen's Restart button works.
+- [x] Custom boot disk: `tools/build_disk.py` (machfs; manifest, `--extra` apps, `--prep`
+      desktop DB, `floppy` profile) → `ROM/custom_753.dsk` 2880K (flash limit ~2.89 MB;
+      firmware 0x3DC6A0 of 0x3F0000). `DISK_NAME` build variable (default still OS_750_boot.dsk).
+      Large volumes mount through the existing floppy paths (Classic: csCode 6 format list,
+      drive writeProt $80 → read-only). Current user image: System + Finder, Calculator,
+      Key Caps, Shut Down, 7 control panels, SimpleText, a full-screen game, a full-screen game (BW),
+      128K free.
+- [ ] Open: games want 512×342 and a keyboard (see Step 2); writable disk (PSRAM overlay or
+      flash); LC II Monitors cdev says "cannot be used" (V8 video not recognised).
+
 ## Step 3 — Native acceleration (the "native OS" track)
 
 Principle: do not rewrite Mac OS. Replace the hottest pieces with native C, guided by
@@ -114,7 +134,7 @@ measurement, and verify every replacement byte-for-byte on the host harness.
       BlockMove) are each <0.5% → **not** worth native replacement yet. The trap dispatcher is
       15-17% of all instructions. **LC II runs ~2× instructions per frame vs Classic**
       (20.8k vs 10.2k) because 68030 cycle timings are ~half at the same 130,560 cycles/frame.
-- [ ] 3a′. **New top priority (from 3a):** (1) idle fast-forward: end the frame early when the
+- [x] 3a′ items 1-2 done 2026-10-21 (idle fast-forward + V8 cycle scale). **Remaining from 3a:** (1) idle fast-forward: end the frame early when the
       Mac is provably waiting (null-event polling within one tick, Ticks wait loops), with a
       60 fps real-time throttle; (2) LC II per-frame cycle budget scaled to match the Classic's
       instruction rate per tick; (3) native A-line trap dispatcher; (4) native resource
@@ -140,7 +160,7 @@ measurement, and verify every replacement byte-for-byte on the host harness.
 
 - [ ] Double-buffer `line_buf` in `mac_video.c` (+19 KB DMA RAM) so render and SPI overlap.
 - [ ] Consider a 640×480 → 480×320 option only if wanted (lossy); native 480×320 is the default.
-- [ ] Virtual SCSI hard disk (NCR 5380 target: INQUIRY/READ/WRITE) in a flash partition or
+- [ ] (Lower priority now: a 2880K HFS volume already mounts through the floppy path on both builds — see Step 2c.) Virtual SCSI hard disk (NCR 5380 target: INQUIRY/READ/WRITE) in a flash partition or
       PSRAM: about 1.5 MB of flash is free after the LC II switch.
 - [ ] Optional: original Mac LC ROM (68020, no MMU, `350EACF0`) as a fallback if the LC II's
       MMU stub ever proves insufficient. ROM collection reference:

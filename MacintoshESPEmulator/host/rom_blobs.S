@@ -19,11 +19,17 @@ START(ROM_SYM):
 END(ROM_SYM):
 
 #if HAS_DISK_IMAGE
+#ifndef DISK_FILE
+#define DISK_FILE "OS_750_boot.dsk"
+#endif
+#ifndef DISK_SYM
+#define DISK_SYM OS_750_boot_dsk
+#endif
     .balign 16
-    .global _binary_OS_750_boot_dsk_start, _binary_OS_750_boot_dsk_end
-_binary_OS_750_boot_dsk_start:
-    .incbin "OS_750_boot.dsk"
-_binary_OS_750_boot_dsk_end:
+    .global START(DISK_SYM), END(DISK_SYM)
+START(DISK_SYM):
+    .incbin DISK_FILE
+END(DISK_SYM):
 #endif
 
     .section .note.GNU-stack,"",@progbits

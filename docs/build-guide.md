@@ -80,9 +80,40 @@ Single factory partition. Firmware (2.4MB) includes embedded ROM + disk image wi
 
 ROM and disk images are embedded into flash via ESP-IDF's `EMBED_FILES` in `main/CMakeLists.txt`:
 - `Classic.ROM` → accessible as `_binary_Classic_ROM_start/end`
-- `OS_750_boot.dsk` → accessible as `_binary_OS_750_boot_dsk_start/end`
+- the disk image named by `DISK_NAME` (default `OS_750_boot.dsk`) → `_binary_<DISK_NAME as C identifier>_start/end` (e.g. `_binary_OS_750_boot_dsk_start`); the C code gets the symbol stem as `DISK_SYM`
 
 These land in `.rodata` (flash), not DRAM.
+
+### Custom boot disk (larger than a floppy)
+
+`tools/build_disk.py` builds a bare HFS System 7.5.3 volume from images you supply
+(no Apple data is in the repo). It takes System, Finder, Finder Preferences and the
+boot blocks from a bootable 7.5.3 floppy, copies the items listed in its `MANIFEST`
+(Apple menu items, control panels, SimpleText) from a full 7.5.3 hard-disk image,
+and optionally adds your own apps (MacBinary `.bin` files or HFS images) to
+`Applications`. Needs `pip install machfs` (or `--pylib DIR` with an unpacked copy).
+
+```bash
+python3 tools/build_disk.py ROM/OS_750_boot.dsk --hd "/path/System 7.5.3 HD.dsk" \
+    [--extra ~/macapps] [--size 2880K|floppy] [--exclude NAME] [--include NAME] \
+    [--prep] [--out ROM/custom_753.dsk]
+```
+
+- `--size`: default 2880K (the flash budget allows ~2.89 MB: app partition 0x3F0000
+  minus ~1.10 MB code and the 512 KB ROM). `floppy` = 1440K, dropping the
+  lowest-priority manifest items until it fits.
+- `--prep` (recommended, WSL/Linux): boots the new image once in the host harness
+  (LC II build, `LC-II.ROM` must be in the output folder) with the disk writable
+  (`macemu --disk-rw`), lets the Finder build the desktop database (real icons on the
+  read-only volume), then shuts down cleanly. Without it the Finder shows generic icons.
+- WindowShade is `optional` (`--include WindowShade`): its INIT corrupts memory on the
+  Classic build (opening General Controls then crashes); it works on the LC II.
+
+Then set `DISK_NAME "custom_753.dsk"` in `main/CMakeLists.txt` (host:
+`make DISK_NAME=custom_753.dsk`, with its own `BUILD=` dir). The image is served through
+the floppy path (.Sony drive 1) at any size; it is read-only: writes fail with wPrErr
+and the volume mounts locked (Note Pad says "the file could not be opened"; Stickies
+opens without saving).
 
 ## Regenerating Musashi Opcode Tables
 

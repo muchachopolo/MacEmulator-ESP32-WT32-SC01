@@ -16,7 +16,10 @@ CC       ?= gcc
 MAC_ROM_LC_II  ?= 1
 # MAC_V8_CUDA: 1 = Color Classic (bring-up ROM, Cuda), 0 = LC II (target, Egret)
 MAC_V8_CUDA    ?= 0
-HAS_DISK_IMAGE ?= $(if $(wildcard $(ROM_DIR)/OS_750_boot.dsk),1,0)
+# DISK_NAME: disk image in ROM_DIR (mirrors DISK_NAME in main/CMakeLists.txt)
+DISK_NAME      ?= OS_750_boot.dsk
+DISK_SYM       := $(shell echo '$(DISK_NAME)' | sed 's/[^A-Za-z0-9_]/_/g')
+HAS_DISK_IMAGE ?= $(if $(wildcard $(ROM_DIR)/$(DISK_NAME)),1,0)
 ifeq ($(MAC_ROM_LC_II),1)
 ifeq ($(MAC_V8_CUDA),1)
 ROM_FILE := Color-Classic.ROM
@@ -32,14 +35,14 @@ endif
 
 ARCH     := $(if $(M32),-m32,)
 OPT      ?= -O2 -g
-DEFS     := -DHAS_DISK_IMAGE=$(HAS_DISK_IMAGE) -DMAC_ROM_LC_II=$(MAC_ROM_LC_II) -DMAC_V8_CUDA=$(MAC_V8_CUDA) -DHOST_BUILD=1 $(if $(TRACE),-DHOST_TRACE=1,) $(EXTRA_DEFS)
+DEFS     := -DHAS_DISK_IMAGE=$(HAS_DISK_IMAGE) -DMAC_ROM_LC_II=$(MAC_ROM_LC_II) -DMAC_V8_CUDA=$(MAC_V8_CUDA) -DDISK_SYM=$(DISK_SYM) -DHOST_BUILD=1 $(if $(TRACE),-DHOST_TRACE=1,) $(EXTRA_DEFS)
 INCS     := -Ishim -I$(ROOT)/main -I$(ROOT)/components/musashi -I$(ROOT)/components/display/include
 CFLAGS   := $(ARCH) $(OPT) -std=gnu17 -fno-strict-aliasing $(DEFS) $(INCS)
 WARN     := -Wall -Wno-unused-variable -Wno-unused-function -Wno-unused-but-set-variable
 # Same suppressions as components/musashi/CMakeLists.txt
 MUSASHI_WARN := -w
 
-CORE_SRCS := mac_emulator.c mac_memory.c mac_video.c mac_via.c mac_scc.c mac_scsi.c mac_iwm.c mac_egret.c mac_v8video.c mac_v8disk.c mac_touch.c
+CORE_SRCS := mac_emulator.c mac_memory.c mac_video.c mac_via.c mac_scc.c mac_scsi.c mac_iwm.c mac_egret.c mac_v8video.c mac_v8disk.c mac_touch.c mac_rtc.c
 MUSASHI_SRCS := m68kcpu.c m68kops.c softfloat/softfloat.c
 
 OBJS := $(addprefix $(BUILD)/main/,$(CORE_SRCS:.c=.o)) \
@@ -65,9 +68,9 @@ $(BUILD)/%.o: %.c $(SHIMS) Makefile
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(WARN) -c $< -o $@
 
-$(BUILD)/rom_blobs.o: rom_blobs.S $(ROM_DIR)/$(ROM_FILE) Makefile
+$(BUILD)/rom_blobs.o: rom_blobs.S $(ROM_DIR)/$(ROM_FILE) $(wildcard $(ROM_DIR)/$(DISK_NAME)) Makefile
 	@mkdir -p $(dir $@)
-	$(CC) $(ARCH) $(DEFS) -DROM_FILE='"$(ROM_FILE)"' -DROM_SYM=$(ROM_SYM) \
+	$(CC) $(ARCH) $(DEFS) -DROM_FILE='"$(ROM_FILE)"' -DROM_SYM=$(ROM_SYM) -DDISK_FILE='"$(DISK_NAME)"' \
 	    -Wa,-I$(ROM_DIR) -c $< -o $@
 
 FRAMES ?= 3000

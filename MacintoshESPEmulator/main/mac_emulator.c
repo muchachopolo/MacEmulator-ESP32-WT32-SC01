@@ -44,8 +44,15 @@ extern const uint8_t rom_end[]   asm("_binary_Classic_ROM_end");
 
 /* Disk image - only available if HAS_DISK_IMAGE is set in CMakeLists.txt */
 #if HAS_DISK_IMAGE
-extern const uint8_t disk_start[] asm("_binary_OS_750_boot_dsk_start");
-extern const uint8_t disk_end[]   asm("_binary_OS_750_boot_dsk_end");
+/* DISK_SYM = C identifier of the embedded file name (CMake/Makefile
+ * DISK_NAME, e.g. OS_750_boot_dsk or custom_753_dsk). */
+#ifndef DISK_SYM
+#define DISK_SYM OS_750_boot_dsk
+#endif
+#define DISK_STR2(x) #x
+#define DISK_STR(x)  DISK_STR2(x)
+extern const uint8_t disk_start[] asm("_binary_" DISK_STR(DISK_SYM) "_start");
+extern const uint8_t disk_end[]   asm("_binary_" DISK_STR(DISK_SYM) "_end");
 #endif
 
 /* Mouse state from touch input */
@@ -2156,7 +2163,14 @@ void mac_emu_run(void *param)
                      *  +16: diskErrs    (word)  = 0        @ $0056
                      */
                     ram_ptr[0x0040]=0x00; ram_ptr[0x0041]=0x00; /* track=0 */
-                    ram_ptr[0x0042]=0x00;                       /* writeProt=0 */
+                    /* writeProt bit 7: the image is in flash (read-only).
+                     * The File Manager then mounts the volume locked and
+                     * never writes. Unlocked, .Sony _Write calls reached the
+                     * bypassed ROM driver: sync ones "succeeded" (the Prime
+                     * intercept copied disk data INTO the write buffer) and
+                     * async ones (Desktop Manager on volumes >= 2 MB) never
+                     * completed, hanging the File Manager. */
+                    ram_ptr[0x0042]=0x80;                       /* writeProt */
                     ram_ptr[0x0043]=0x02;                       /* diskInPlace=2 */
                     ram_ptr[0x0044]=0xFF;                       /* installed=-1 */
                     ram_ptr[0x0045]=0xFF;                       /* sides=-1 */
@@ -3055,6 +3069,23 @@ void mac_emu_run(void *param)
             }
         }
 
+#if !MAC_ROM_LC_II
+        /* --- Classic shutdown screen detection ---
+         * After Special > Shut Down the ROM draws "It is now safe to switch
+         * off your Macintosh." and polls MBState in $401602-$401634 waiting
+         * for a click on Restart. Log once so the ESP32 could later blank
+         * the backlight (no power control here). */
+        {
+            static bool sd_logged = false;
+            uint32_t sd_pc = m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF;
+            if (!sd_logged && mac_post_boot && sd_pc >= 0x401602 && sd_pc < 0x401640) {
+                ESP_LOGW(TAG, "SHUTDOWN: safe to power off (F%d)", frame_count);
+                sd_logged = true;
+            }
+        }
+        /* --- end shutdown detection --- */
+#endif
+
         frame_count++;
 
 #if MAC_ROM_LC_II
@@ -3213,11 +3244,9 @@ void mac_emu_run(void *param)
 
                 /* MBState $0172 — write every frame (Mac code may overwrite).
                  * bit 7: 0=down, 1=up */
-                if (mb) {
-                    r[0x0172] &= ~0x80;
-                } else {
-                    r[0x0172] |= 0x80;
-                }
+                /* Whole byte, as the ROM writes it ($00/$80): the shutdown
+                 * screen's click loop ($401602) waits for exactly $00 */
+                r[0x0172] = mb ? 0x00 : 0x80;
 
                 if (btn_changed) {
                     prev_mb = (int)mb;

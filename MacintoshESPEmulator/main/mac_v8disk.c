@@ -81,7 +81,7 @@ static void v8disk_prime(void)
     uint32_t dsize = iwm_get_disk_size();
     uint32_t done  = 0;
 
-    if (drive == 1 && disk) {
+    if (drive == 1 && disk && !iwm_disk_writable) {
         /* Mark the drive's DrvSts write-protected so the File Manager
          * mounts the (flash, read-only) volume locked.  The ROM driver
          * would set this in its own Prime, which is bypassed here. */
@@ -99,10 +99,13 @@ static void v8disk_prime(void)
         err = nsDrvErr;
     } else if (!disk || !iwm_disk_inserted()) {
         err = offLinErr;
-    } else if ((trap & 0x0F) == 0x03) {
+    } else if ((trap & 0x0F) == 0x03 && !iwm_disk_writable) {
         err = wPrErr;                              /* image lives in flash */
     } else if (pos > dsize || cnt > dsize - pos || buf + cnt > rsz) {
         err = paramErr;
+    } else if ((trap & 0x0F) == 0x03) {
+        memcpy(disk + pos, ram + buf, cnt);        /* host --disk-rw only */
+        done = cnt;
     } else {
         memcpy(ram + buf, disk + pos, cnt);
         done = cnt;
@@ -112,7 +115,7 @@ static void v8disk_prime(void)
     wr32(ram, pb + 0x2E, pos + done);              /* ioPosOffset */
     m68k_set_reg(M68K_REG_D0, (uint32_t)(int32_t)err);
 
-    if (n_calls < 40 || err != noErr) {
+    if (n_calls < 40 || err != noErr || (iwm_disk_writable && (trap & 0x0F) == 0x03)) {
         ESP_LOGW(TAG, "PRIME #%lu %s drv=%d pos=%lu cnt=%lu buf=$%06lX err=%d",
                  (unsigned long)n_calls, (trap & 0x0F) == 0x03 ? "W" : "R",
                  drive, (unsigned long)pos, (unsigned long)cnt,

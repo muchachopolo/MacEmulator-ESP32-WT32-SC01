@@ -14,9 +14,11 @@ in about a second instead of a flash cycle. Nothing in `main/` or
 | `shim/esp_timer.h`, `shim/esp_cpu.h` | Both read `CLOCK_MONOTONIC` (`esp_timer` returns the virtual clock instead with `--vclock`). The cycle count is a 32-bit counter at a nominal 240 MHz, so PROFILE lines still make sense. |
 | `shim/freertos/*.h` | `taskYIELD()` maps to `host_frame_hook()` (see below). `xPortGetCoreID()` is 1. `vTaskDelay` does nothing. |
 | `display_stub.c` | `display_draw` captures strips into a 480x320 RGB565 buffer. `display_get_touch` plays back the `--tap` / `--swipe` scripts. |
-| `rom_blobs.S` | Uses `.incbin` to embed the ROM and disk under the same `_binary_Color_Classic_ROM_*` and `_binary_OS_750_boot_dsk_*` symbols that EMBED_FILES creates. |
+| `rom_blobs.S` | Uses `.incbin` to embed the ROM and disk under the same `_binary_<ROM>_*` and `_binary_<DISK_NAME>_*` symbols that EMBED_FILES creates. |
 | `host_main.c` | Handles the CLI and per-frame hook, writes PNGs with no dependencies, dumps RAM and reports speed. |
 | `host_prof.c` | Instruction profiler (`make TRACE=1`, `--profile-*`): A-line trap, code-region and interrupt attribution. |
+
+`DISK_NAME=file.dsk` (default `OS_750_boot.dsk`) selects the disk image in the ROM directory, like `DISK_NAME` in `main/CMakeLists.txt`; use a separate `BUILD=` dir per image (objects do not track make variables).
 
 The compile definitions match `main/CMakeLists.txt`: `MAC_ROM_LC_II=1`
 (Color-Classic.ROM) and `HAS_DISK_IMAGE=1`. The build also adds
@@ -59,6 +61,7 @@ Options:
 - `--out DIR`: the screenshot directory. The default is `out`.
 - `--dump-ram FILE`: write the 2 MB Mac RAM image to FILE at exit.
 - `--log FILE`: write the emulator log to FILE instead of stderr. Host `H` lines always go to stderr.
+- `--disk-rw FILE` (LC II build): mount the embedded disk writable (the .Sony Prime hook copies _Write data into the image) and write the modified image to FILE at exit. Used by `tools/build_disk.py --prep` to let the Finder build the desktop database; the firmware disk is always read-only.
 - `--stop-pc LO-HI` (TRACE=1 only): exit as soon as the 24-bit PC enters the hex range LO-HI (or a single address), so `trace_ring.txt` holds the 4096 instructions leading there.
 - `--cpu 68000|68020|68030`: after `mac_emu_init()`, set the CPU type and pulse reset again. Use this to try a CPU type without editing `mac_emulator.c`.
 - `--tap F`: hold the touch panel at a fixed point from frame F for 300 frames (a tap; repeatable).

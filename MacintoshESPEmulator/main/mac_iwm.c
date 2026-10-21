@@ -505,7 +505,7 @@ static uint8_t v8_sense(void)
     case 0x6: return 1;                      /* double-sided: yes */
     case 0x7: return 0;                      /* /DRIVE INSTALLED: yes */
     case 0x8: return disk ? 0 : 1;           /* /DISK IN PLACE */
-    case 0x9: return disk ? 0 : 1;           /* /WRITE PROTECT: image is read-only */
+    case 0x9: return (disk && !iwm_disk_writable) ? 0 : 1; /* /WRITE PROTECT: flash image is read-only */
     case 0xA: return iwm.track == 0 ? 0 : 1; /* /TRACK 0 */
     case 0xD: return 1;                      /* MFM mode */
     case 0xE: return disk ? 0 : 1;           /* /READY */
@@ -1031,6 +1031,9 @@ static void ism_write(int reg, uint8_t value)
         break;
     }
 }
+
+/* Host-only (desktop-prep): disk image buffer is writable RAM. */
+bool iwm_disk_writable = false;
 
 void iwm_init(uint8_t *disk_data, uint32_t disk_size)
 {

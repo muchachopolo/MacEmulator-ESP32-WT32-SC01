@@ -8,8 +8,11 @@
 #include "mac_egret.h"
 #include "mac_v8video.h"
 #endif
+#include "mac_rtc.h"         /* Classic RTC/PRAM on PB0-PB2 (CLASSIC_RTC) */
 #include <string.h>
 #include <esp_log.h>
+
+#define VIA_CLASSIC_RTC (CLASSIC_RTC && !MAC_ROM_LC_II)
 
 static const char *TAG = "via";
 
@@ -88,6 +91,14 @@ void via_init(void)
     via.ira = 0x5D;
 #endif
     egret_init();
+#endif
+#if VIA_CLASSIC_RTC
+    {
+        /* The chip is battery-backed: PRAM and clock survive a 68K reset */
+        static bool rtc_up = false;
+        if (!rtc_up) { macrtc_init(); rtc_up = true; }
+        macrtc_portb_changed(via.orb, via.ddrb);
+    }
 #endif
     via.t1_latch = 0xFFFF;
     via.t1_counter = 0xFFFF;
@@ -215,6 +226,11 @@ uint8_t via_read(uint32_t address)
 #if !MAC_ROM_LC_II
         val |= 0x30;
 #endif
+#if VIA_CLASSIC_RTC
+        /* PB0 input: level driven by the RTC (reads of PRAM / clock) */
+        if (!(via.ddrb & 0x01))
+            val = (uint8_t)((val & ~0x01) | macrtc_data_out());
+#endif
         /* Clear CB1/CB2 flags on read */
         via.ifr &= ~(VIA_IRQ_CB1 | VIA_IRQ_CB2);
         via_update_irq();
@@ -289,6 +305,8 @@ void via_write(uint32_t address, uint8_t value)
         via_update_irq();
 #if MAC_ROM_LC_II
         egret_portb_changed(via.orb, via.ddrb);
+#elif VIA_CLASSIC_RTC
+        macrtc_portb_changed(via.orb, via.ddrb);
 #endif
         break;
 
@@ -316,6 +334,8 @@ void via_write(uint32_t address, uint8_t value)
         via.ddrb = value;
 #if MAC_ROM_LC_II
         egret_portb_changed(via.orb, via.ddrb);
+#elif VIA_CLASSIC_RTC
+        macrtc_portb_changed(via.orb, via.ddrb);
 #endif
         break;
 
@@ -430,6 +450,8 @@ void via_one_second(void)
     via_update_irq();
 #if MAC_ROM_LC_II
     egret_one_second();
+#elif VIA_CLASSIC_RTC
+    macrtc_one_second();
 #endif
 }
 

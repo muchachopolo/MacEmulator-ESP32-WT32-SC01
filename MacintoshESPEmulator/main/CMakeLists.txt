@@ -17,14 +17,19 @@ else()
     set(MAC_V8_CUDA 0)
 endif()
 
-# Optional: disk image
+# Optional: disk image. DISK_NAME selects the file in ROM/ (any size up to
+# the flash budget, ~2.89 MB: app partition 0x3F0000 minus code and ROM).
+# custom_753.dsk = 2880K image from tools/build_disk.py.
+set(DISK_NAME "OS_750_boot.dsk")
+string(MAKE_C_IDENTIFIER "${DISK_NAME}" DISK_SYM)
 set(HAS_DISK_IMAGE 0)
-if(EXISTS "${ROM_DIR}/OS_750_boot.dsk")
-    list(APPEND EMBED_FILES "${ROM_DIR}/OS_750_boot.dsk")
+if(EXISTS "${ROM_DIR}/${DISK_NAME}")
+    list(APPEND EMBED_FILES "${ROM_DIR}/${DISK_NAME}")
     set(HAS_DISK_IMAGE 1)
-    message(STATUS "Embedding disk image: OS_750_boot.dsk (1.44MB)")
+    file(SIZE "${ROM_DIR}/${DISK_NAME}" DISK_BYTES)
+    message(STATUS "Embedding disk image: ${DISK_NAME} (${DISK_BYTES} bytes)")
 else()
-    message(STATUS "No disk image found (OS_750_boot.dsk) - will boot to '?' icon")
+    message(STATUS "No disk image found (${DISK_NAME}) - will boot to '?' icon")
 endif()
 
 idf_component_register(
@@ -40,6 +45,7 @@ idf_component_register(
          "mac_iwm.c"
          "mac_v8video.c"
          "mac_v8disk.c"
+         "mac_rtc.c"
     INCLUDE_DIRS "."
     REQUIRES log driver esp_timer display musashi freertos esp_psram
     EMBED_FILES ${EMBED_FILES}
@@ -50,4 +56,5 @@ target_compile_definitions(${COMPONENT_LIB} PRIVATE
     HAS_DISK_IMAGE=${HAS_DISK_IMAGE}
     MAC_ROM_LC_II=${MAC_ROM_LC_II}
     MAC_V8_CUDA=${MAC_V8_CUDA}
+    DISK_SYM=${DISK_SYM}
 )

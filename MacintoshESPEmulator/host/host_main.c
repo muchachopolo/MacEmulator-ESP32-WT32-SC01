@@ -10,9 +10,13 @@
 #include <signal.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <stdint.h>
 
 #include "mac_emulator.h"
 #include "mac_memory.h"
+#include "mac_iwm.h"
 #include "mac_video.h"
 #include "display.h"
 #include "esp_timer.h"
@@ -25,6 +29,7 @@ extern uint16_t host_lcd[DISPLAY_WIDTH * DISPLAY_HEIGHT];
 static long  opt_frames = 0;          /* 0 = run forever */
 static long  opt_shot_every = 300;    /* 0 = no screenshots */
 static const char *opt_dump_ram = NULL;
+static const char *opt_disk_rw = NULL;   /* --disk-rw FILE */
 static const char *opt_out = "out";
 static int   opt_cpu = 0;             /* 0 = keep what mac_emu_init() chose */
 static long  frames = 0;
@@ -317,6 +322,17 @@ static void at_exit(void)
             perror(opt_dump_ram);
         }
     }
+    if (opt_disk_rw && iwm_get_disk_data()) {
+        FILE *f = fopen(opt_disk_rw, "wb");
+        if (f && fwrite(iwm_get_disk_data(), 1, iwm_get_disk_size(), f) ==
+                 iwm_get_disk_size()) {
+            fprintf(stderr, "H host: wrote %u-byte disk image to %s\n",
+                    (unsigned)iwm_get_disk_size(), opt_disk_rw);
+        } else {
+            perror(opt_disk_rw);
+        }
+        if (f) fclose(f);
+    }
     if (host_log_file) fflush(host_log_file);
 }
 
@@ -331,6 +347,8 @@ static void usage(const char *argv0)
         "  --out DIR       screenshot directory (default: out)\n"
         "  --dump-ram FILE write the Mac RAM image to FILE at exit\n"
         "  --log FILE      send emulator log to FILE instead of stderr\n"
+        "  --disk-rw FILE  (LC II build) mount the embedded disk writable and save it to\n"
+        "                  FILE at exit (desktop-database prep, see docs/build-guide.md)\n"
         "  --cpu 68000|68020|68030  override the CPU type mac_emu_init() set (re-pulses reset)\n"
         "  --tap F                  scripted touch tap starting at frame F (repeatable, max 16)\n"
         "  --swipe F:dx:dy[:N]      scripted swipe from frame F over N frames (default 2000),\n"
@@ -357,6 +375,7 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--shot-every") && v) { opt_shot_every = atol(v); i++; }
         else if (!strcmp(a, "--out") && v)        { opt_out = v; i++; }
         else if (!strcmp(a, "--dump-ram") && v)   { opt_dump_ram = v; i++; }
+        else if (!strcmp(a, "--disk-rw") && v)    { opt_disk_rw = v; i++; }
         else if (!strcmp(a, "--cpu") && v)       { opt_cpu = atoi(v); i++; }
         else if (!strcmp(a, "--vclock") && v)    { opt_vclock = atol(v); host_vclock_us = 0; i++; }
         else if (!strcmp(a, "--swipe") && v) {
@@ -400,9 +419,19 @@ int main(int argc, char **argv)
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
 
+    if (opt_disk_rw) iwm_disk_writable = true;
     if (!display_init() || !mac_emu_init()) {
         fprintf(stderr, "H host: init failed\n");
         return 1;
+    }
+    if (opt_disk_rw && iwm_get_disk_data()) {
+        /* the image is embedded in .rodata: make its pages writable */
+        long pg = sysconf(_SC_PAGESIZE);
+        uintptr_t lo = (uintptr_t)iwm_get_disk_data() & ~(uintptr_t)(pg - 1);
+        uintptr_t hi = (uintptr_t)iwm_get_disk_data() + iwm_get_disk_size();
+        if (mprotect((void *)lo, hi - lo, PROT_READ | PROT_WRITE) != 0) {
+            perror("mprotect"); return 1;
+        }
     }
     if (opt_cpu) {
         int t = opt_cpu == 68030 ? M68K_CPU_TYPE_68030 :
