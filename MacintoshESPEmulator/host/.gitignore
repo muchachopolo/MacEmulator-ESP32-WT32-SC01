@@ -1,0 +1,9 @@
+# Host harness: track only sources; build and run folders (build*/, out*/,
+# per-experiment scratch dirs, trace files) are local.
+/*
+!/.gitignore
+!/Makefile
+!/README.md
+!/*.c
+!/*.S
+!/shim/
