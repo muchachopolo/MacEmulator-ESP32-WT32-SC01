@@ -8,10 +8,17 @@ SD card, with a 3.5-inch SPI touch shield. Status: not started — this is the p
 - **Raspberry Pi 2 Model B v1.1 (2014)** — BCM2836, **4× ARM Cortex-A7 @ 900 MHz**
   (ARMv7, NEON/VFPv4), **1 GB RAM**, 40-pin header. (Better than the Pi 1 the plan
   first assumed: multicore lets us split emulation and display/touch like on the ESP32.)
-- **AC-TFT35-V2.1** 3.5" shield — no datasheet found under this name; it matches the
-  generic "3.5inch RPi Display": **480×320, ILI9486 controller (some clones: ILI9488),
-  XPT2046 resistive touch, SPI on the GPIO header**. To confirm: the controller marking
-  (ILI9486 vs ILI9488) on the PCB/FPC and the pin mapping (vendor driver/overlay).
+- **AC-TFT35-V2.1** 3.5" shield — **identified (2026-10-21)** from the chips on the back
+  (2× 74HC4094D, 74HC4040D, 74HC04D, XPT2046) as the classic **"3.5inch RPi LCD (A)"**
+  design (Waveshare (A) and clones; Linux overlay `waveshare35a` / `tft35a`):
+  **ILI9486** (chip-on-glass) driven in 16-bit parallel mode through two 74HC4094
+  serial-to-parallel shift registers; the 74HC4040 counts SPI clocks and strobes WR
+  every 16 bits. Consequences: **every transfer is a 16-bit word** (8-bit commands are
+  sent padded to 16 bits; pixels are RGB565 words), the bus is **write-only** (no ID
+  readback), DC/RESET are GPIOs. Pins: SPI0 MOSI GPIO10, SCLK GPIO11, LCD CS = CE0
+  (GPIO8), **DC = GPIO24, RESET = GPIO25**; touch **XPT2046** on CE1 (GPIO7), MISO
+  GPIO9, **PENIRQ = GPIO17**. SPI clock: Linux default ~16 MHz; many units run
+  32 MHz+ — measure in R1.
 
 Pi 2 specifics used below: the GPU firmware loads **`kernel7.img`** (ARMv7) at
 `0x8000`; peripherals at `0x3F000000` (BCM2836); compile with
@@ -36,7 +43,7 @@ secondary cores are started through the BCM2836 local mailboxes.
 | Item | Why | Status |
 |---|---|---|
 | **Pi model** | Pi 2 Model B v1.1 — quad Cortex-A7 900 MHz, 1 GB, 40-pin header | **known** |
-| **Shield model** | AC-TFT35-V2.1 — generic 3.5" RPi display (ILI9486 or ILI9488 + XPT2046); confirm the controller marking, the SPI format (many of these boards put a 16-bit shift register in front of the controller and expect 16-bit words) and the max SPI clock | confirm chip marking |
+| **Shield model** | AC-TFT35-V2.1 = "3.5inch RPi LCD (A)" design: ILI9486 via 16-bit shift registers + XPT2046 (see above) | **identified**; max SPI clock to measure |
 | **Touch type** | Most TFT35 shields use an **XPT2046 resistive** controller on SPI (CE1, IRQ on GPIO17); capacitive variants use I²C | ask user / identify on PCB |
 | Shield pin mapping | Typical: SPI0 MOSI 10 / MISO 9 / SCLK 11, LCD CS = CE0 (GPIO8), touch CS = CE1 (GPIO7), LCD DC = GPIO24, LCD RESET = GPIO25, touch IRQ = GPIO17 — confirm from the vendor | verify |
 | micro/SD card | FAT32 boot partition: firmware files, `kernel7.img`, ROMs, disk images | user |
@@ -105,11 +112,9 @@ Higher SPI clocks are often possible on these shields — measure.
 - [ ] **R0. Identify the hardware**: Pi model, shield model/controller, touch
       type, pin mapping; set up `arm-none-eabi-gcc` + Circle (or decide on a
       from-scratch runtime).
-- [ ] **R1. Hello, display** (also identifies the controller: on these boards the
-      ILI9486/ILI9488 is chip-on-glass and not visible; the XPT2046 on the back is
-      the touch chip. 74HC4094/74HC595/74HC245 chips on the back ⇒ the classic
-      "3.5inch RPi LCD (A)" design: ILI9486 behind shift registers, write-only,
-      16-bit words. Try the ILI9486 init first, then ILI9488 if the image is wrong): Circle sample that initialises the ILI9486 over
+- [ ] **R1. Hello, display** (ILI9486 through the 16-bit shift registers: send the
+      fbtft `fb_ili9486`/`waveshare35a` init sequence as 16-bit words, DC on GPIO24,
+      RESET on GPIO25; find the highest stable SPI clock, 16 → 32 → 48 MHz): Circle sample that initialises the ILI9486 over
       SPI and fills 480×320 test patterns; measure the achievable SPI clock.
 - [ ] **R2. Touch**: XPT2046 reads, calibration (stored in `/mac/config.txt`),
       debug overlay of the touch point.

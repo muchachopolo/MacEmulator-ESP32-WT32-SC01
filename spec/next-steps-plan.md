@@ -275,8 +275,9 @@ Steps:
 
 Full plan: [`raspberry-pi-port.md`](raspberry-pi-port.md). Run the same core on a
 Raspberry Pi 2 Model B (quad Cortex-A7, 1 GB) with the user's AC-TFT35-V2.1 3.5" shield
-(likely ILI9486/ILI9488 480×320 + XPT2046 resistive touch), booting `kernel7.img` from the SD card without an OS
-(Circle framework suggested). Still to confirm: the shield's controller marking (ILI9486 vs ILI9488). Shares the ADB keyboard work with Step 6b.
+(identified: ILI9486 480×320 via 16-bit shift registers + XPT2046 resistive touch — the
+"3.5inch RPi LCD (A)" design), booting `kernel7.img` from the SD card without an OS
+(Circle framework suggested). Hardware fully identified 2026-10-21. Shares the ADB keyboard work with Step 6b.
 
 ## Step 2e — LC II game full view (in progress 2026-10-21)
 
