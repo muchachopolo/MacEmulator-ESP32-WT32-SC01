@@ -13,9 +13,10 @@ A 68k Macintosh emulator (Musashi CPU core) for the WT32-SC01 v3.4 board
   measure speed. Only the main session flashes the board.
 - **Never commit ROMs or disk images** (Apple copyright). `ROM/` is git-ignored;
   never publish built firmware (it embeds the ROM and disk).
-- **Commit with the defaults** `ROM_NAME "LC-II.ROM"` and
-  `DISK_NAME "OS_750_boot.dsk"` in `main/CMakeLists.txt`, even if you build
-  locally with other values.
+- **Committed defaults** (user decision 2026-10-21): `ROM_NAME "Classic.ROM"`
+  and `DISK_NAME "custom_753.dsk"` in `main/CMakeLists.txt`; CMake falls back
+  to `OS_750_boot.dsk` when the custom disk hasn't been built. The disk image
+  itself is never committed — `tools/make_custom_disk.sh` is its recipe.
 - **No `Co-Authored-By` lines** in commit messages.
 - Measure speed as ESP32 exec cycles per 300 frames or wall-clock per task
   (boot-to-Finder seconds), never real-time % across different machines.
@@ -49,13 +50,15 @@ One codebase, two machine targets, picked in `main/CMakeLists.txt`:
 
 | `ROM_NAME` | Machine | Derived defines |
 |---|---|---|
-| `LC-II.ROM` (committed default) | LC II: 68030, V8 chipset, Egret, colour | `MAC_ROM_LC_II=1`, `MAC_V8_CUDA=0` |
-| `Classic.ROM` | Mac Classic: 68000, 1-bit | `MAC_ROM_LC_II=0` |
+| `Classic.ROM` (committed default) | Mac Classic: 68000, 1-bit | `MAC_ROM_LC_II=0` |
+| `LC-II.ROM` | LC II: 68030, V8 chipset, Egret, colour | `MAC_ROM_LC_II=1`, `MAC_V8_CUDA=0` |
 | `Color-Classic.ROM` | Color Classic (reference only, 1 MB ROM, Cuda) | `MAC_ROM_LC_II=1`, `MAC_V8_CUDA=1` |
 
-`DISK_NAME` (default `OS_750_boot.dsk`) selects the disk image in `ROM/`;
-`DISK_SYM` is its C identifier. `custom_753.dsk` (2880K) comes from
-`tools/build_disk.py`. ROM checksums: Classic `A49F9914`, LC II `35C28F5F`,
+`DISK_NAME` (default `custom_753.dsk`, falling back to `OS_750_boot.dsk` if
+absent) selects the disk image in `ROM/`; `DISK_SYM` is its C identifier.
+`custom_753.dsk` (2880K) comes from `tools/build_disk.py`; the project's own
+disk is reproduced by `tools/make_custom_disk.sh` (host harness default stays
+LC II + `OS_750_boot.dsk`, see host/README.md). ROM checksums: Classic `A49F9914`, LC II `35C28F5F`,
 Color Classic `ECD99DC0`.
 
 The host Makefile mirrors this: `make MAC_ROM_LC_II=0` (Classic),

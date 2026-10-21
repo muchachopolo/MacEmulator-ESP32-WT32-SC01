@@ -1,9 +1,10 @@
 # Embed ROM and disk images from the ROM directory
 set(ROM_DIR "${CMAKE_SOURCE_DIR}/../ROM")
 
-# Required ROM. LC-II.ROM (512KB, V8/Egret) is the target; Color-Classic.ROM
-# (1MB, V8/Cuda) was the bring-up ROM; Classic.ROM selects the 68000 build.
-set(ROM_NAME "LC-II.ROM")
+# Required ROM (user-supplied, see README). Classic.ROM = Mac Classic, 68000,
+# 1-bit (default); LC-II.ROM = LC II, 68030 V8 + Egret, colour;
+# Color-Classic.ROM = V8 + Cuda reference build.
+set(ROM_NAME "Classic.ROM")
 set(EMBED_FILES "${ROM_DIR}/${ROM_NAME}")
 if(ROM_NAME STREQUAL "LC-II.ROM" OR ROM_NAME STREQUAL "Color-Classic.ROM")
     set(MAC_ROM_LC_II 1)
@@ -20,7 +21,13 @@ endif()
 # Optional: disk image. DISK_NAME selects the file in ROM/ (any size up to
 # the flash budget, ~2.89 MB: app partition 0x3F0000 minus code and ROM).
 # custom_753.dsk = 2880K image from tools/build_disk.py.
-set(DISK_NAME "OS_750_boot.dsk")
+# Falls back to the plain System 7.5.3 boot floppy if the custom disk has not
+# been built (tools/make_custom_disk.sh).
+set(DISK_NAME "custom_753.dsk")
+if(NOT EXISTS "${ROM_DIR}/${DISK_NAME}" AND EXISTS "${ROM_DIR}/OS_750_boot.dsk")
+    message(STATUS "${DISK_NAME} not found - falling back to OS_750_boot.dsk")
+    set(DISK_NAME "OS_750_boot.dsk")
+endif()
 string(MAKE_C_IDENTIFIER "${DISK_NAME}" DISK_SYM)
 set(HAS_DISK_IMAGE 0)
 if(EXISTS "${ROM_DIR}/${DISK_NAME}")

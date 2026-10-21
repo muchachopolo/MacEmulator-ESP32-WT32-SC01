@@ -41,8 +41,8 @@ In `MacintoshESPEmulator/main/CMakeLists.txt`:
 
 | Variable | Committed default | Effect |
 |---|---|---|
-| `ROM_NAME` | `LC-II.ROM` | `Classic.ROM` → Classic build (`MAC_ROM_LC_II=0`); `LC-II.ROM` → LC II (`MAC_ROM_LC_II=1`, `MAC_V8_CUDA=0`); `Color-Classic.ROM` → `MAC_V8_CUDA=1` |
-| `DISK_NAME` | `OS_750_boot.dsk` | Disk image in `ROM/` to embed; `DISK_SYM` is derived from it. If the file is missing the Mac boots to the "?" disk icon |
+| `ROM_NAME` | `Classic.ROM` | `Classic.ROM` → Classic build (`MAC_ROM_LC_II=0`); `LC-II.ROM` → LC II (`MAC_ROM_LC_II=1`, `MAC_V8_CUDA=0`); `Color-Classic.ROM` → `MAC_V8_CUDA=1` |
+| `DISK_NAME` | `custom_753.dsk` | Disk image in `ROM/` to embed; `DISK_SYM` is derived from it. Falls back to `OS_750_boot.dsk` if the custom disk hasn't been built; if neither exists the Mac boots to the "?" disk icon |
 
 `MUSASHI_HOT_IRAM` (ON) is set in `components/musashi/CMakeLists.txt`. All
 other switches are C defines; the list with defaults is in
@@ -127,7 +127,7 @@ python3 tools/build_disk.py ROM/OS_750_boot.dsk --hd "/path/System 7.5.3 HD.dsk"
 - `--include WindowShade`: optional, because its INIT corrupts memory on the
   Classic build (General Controls then crashes). It works on the LC II.
 
-Then set `DISK_NAME "custom_753.dsk"` (host: `make DISK_NAME=custom_753.dsk
+The project's own disk (System 7.5.3 essentials + a full-screen game + a full-screen game with silenced sounds) is reproduced from your own source images by `tools/make_custom_disk.sh HD_IMAGE CQ_IMAGE POP_APP_IMAGE POP_DATA_IMAGE`. `DISK_NAME "custom_753.dsk"` is already the default (host: `make DISK_NAME=custom_753.dsk
 BUILD=build_cd`). Any size up to the flash budget mounts through the floppy
 path (.Sony drive 1) on both machines.
 

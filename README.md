@@ -111,8 +111,8 @@ Details: [`docs/build-guide.md`](docs/build-guide.md#custom-boot-disk).
 Edit two lines in `MacintoshESPEmulator/main/CMakeLists.txt`:
 
 ```cmake
-set(ROM_NAME "LC-II.ROM")         # or "Classic.ROM", "Color-Classic.ROM"
-set(DISK_NAME "OS_750_boot.dsk")  # or "custom_753.dsk"
+set(ROM_NAME "Classic.ROM")       # default; or "LC-II.ROM", "Color-Classic.ROM"
+set(DISK_NAME "custom_753.dsk")   # default; falls back to "OS_750_boot.dsk" if absent
 ```
 
 ### 4. (Optional) Regenerate the Musashi opcode tables
