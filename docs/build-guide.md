@@ -1,123 +1,28 @@
-# Build Guide
+# Build guide
+
+See also: [README quick start](../README.md#quick-start),
+[host harness](../MacintoshESPEmulator/host/README.md),
+[hardware](hardware.md).
 
 ## Prerequisites
 
-1. **ESP-IDF v6.0** installed via EIM at `C:\esp\v6.0\esp-idf`
-   - Tools at `C:\Espressif\tools`
-   - Python venv at `C:\Espressif\tools\python\v6.0\venv`
+1. **ESP-IDF v6.1.** The project is developed on Windows with the Espressif
+   installer (EIM): IDF at `C:\esp\v6.1\esp-idf`, tools at `C:\Espressif\tools`.
+   On Linux/macOS, use a normal ESP-IDF v6.1 install and run `idf.py` directly.
+2. **A host C compiler** to generate the Musashi opcode tables (MinGW/WinLibs
+   gcc on Windows, e.g. `winget install BrechtSanders.WinLibs.POSIX.UCRT`, or
+   gcc on Linux/WSL).
+3. **A ROM and a boot disk** in `ROM/` next to `MacintoshESPEmulator/`
+   (git-ignored, user-supplied): `LC-II.ROM` and/or `Classic.ROM`
+   (`Color-Classic.ROM` optional), and a System 7.5.3 boot disk
+   (`OS_750_boot.dsk`, or a custom image, see below).
+4. Optional: WSL/Linux with gcc and make for the host harness and
+   `build_disk.py --prep`; Python 3 with `machfs` for `build_disk.py`.
 
-2. **MinGW GCC** (only needed if regenerating Musashi opcode tables)
-   - Install: `winget install BrechtSanders.WinLibs.POSIX.UCRT`
-   - Used to compile `m68kmake.c` as a host tool
+## Regenerate the Musashi opcode tables (only after editing `m68k_in.c`)
 
-3. **ROM files** in `ROM/` directory:
-   - `Classic.ROM` (512KB) — **required**
-   - `OS_750_boot.dsk` (1.44MB) — optional boot floppy
-
-## Building
-
-ESP-IDF v6.0 rejects MSYS/MinGW shells. All builds MUST go through `build.bat` via `cmd.exe`:
-
-```bash
-# Build
-cmd.exe //C "D:\\Personal\\Macintosh\\MacintoshESPEmulator\\build.bat build"
-
-# Flash (connect board first)
-cmd.exe //C "D:\\Personal\\Macintosh\\MacintoshESPEmulator\\build.bat flash"
-
-# Monitor serial output
-cmd.exe //C "D:\\Personal\\Macintosh\\MacintoshESPEmulator\\build.bat monitor"
-
-# Flash and monitor in one step
-cmd.exe //C "D:\\Personal\\Macintosh\\MacintoshESPEmulator\\build.bat flash monitor"
-
-# Check binary size
-cmd.exe //C "D:\\Personal\\Macintosh\\MacintoshESPEmulator\\build.bat size"
-```
-
-### After a Full Clean
-
-```bash
-cmd.exe //C "D:\\Personal\\Macintosh\\MacintoshESPEmulator\\build.bat fullclean"
-cmd.exe //C "D:\\Personal\\Macintosh\\MacintoshESPEmulator\\build.bat set-target esp32"
-cmd.exe //C "D:\\Personal\\Macintosh\\MacintoshESPEmulator\\build.bat build"
-```
-
-## build.bat Explained
-
-The build script (`MacintoshESPEmulator/build.bat`) does the following:
-
-1. Sets `IDF_PATH`, `IDF_TOOLS_PATH`, `IDF_PYTHON_ENV_PATH`, etc.
-2. Clears MSYS/MinGW environment variables (`MSYSTEM`, `MSYS`, etc.) to prevent ESP-IDF from rejecting the shell
-3. Sets `ESP_IDF_VERSION=6.0.0` (required by idf_component_manager)
-4. Configures `PATH` with all ESP-IDF tool directories
-5. Runs `idf.py` with whatever arguments are passed
-
-## Project Configuration
-
-### sdkconfig.defaults
-
-Key settings:
-- `CONFIG_IDF_TARGET="esp32"` — ESP32 (not S2/S3/C3)
-- `CONFIG_ESPTOOLPY_FLASHSIZE_4MB` — 4MB flash (actual hardware, despite 16MB label)
-- `CONFIG_SPIRAM=y` — Enable 8MB PSRAM
-- `CONFIG_SPIRAM_SPEED_80M=y` — PSRAM at 80MHz
-- `CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y` — Allow `EXT_RAM_BSS_ATTR`
-- `CONFIG_PARTITION_TABLE_CUSTOM=y` — Custom partition table
-- `CONFIG_COMPILER_OPTIMIZATION_PERF=y` — Optimize for speed
-
-### Partition Table (partitions.csv)
-
-```
-nvs,       data,  nvs,      0x9000,   0x6000
-phy_init,  data,  phy,      0xf000,   0x1000
-factory,   app,   factory,  0x10000,  0x3F0000   (~3.9MB of 4MB flash)
-```
-
-Single factory partition. Firmware (2.4MB) includes embedded ROM + disk image with 41% free.
-
-### Embedded Files
-
-ROM and disk images are embedded into flash via ESP-IDF's `EMBED_FILES` in `main/CMakeLists.txt`:
-- `Classic.ROM` → accessible as `_binary_Classic_ROM_start/end`
-- the disk image named by `DISK_NAME` (default `OS_750_boot.dsk`) → `_binary_<DISK_NAME as C identifier>_start/end` (e.g. `_binary_OS_750_boot_dsk_start`); the C code gets the symbol stem as `DISK_SYM`
-
-These land in `.rodata` (flash), not DRAM.
-
-### Custom boot disk (larger than a floppy)
-
-`tools/build_disk.py` builds a bare HFS System 7.5.3 volume from images you supply
-(no Apple data is in the repo). It takes System, Finder, Finder Preferences and the
-boot blocks from a bootable 7.5.3 floppy, copies the items listed in its `MANIFEST`
-(Apple menu items, control panels, SimpleText) from a full 7.5.3 hard-disk image,
-and optionally adds your own apps (MacBinary `.bin` files or HFS images) to
-`Applications`. Needs `pip install machfs` (or `--pylib DIR` with an unpacked copy).
-
-```bash
-python3 tools/build_disk.py ROM/OS_750_boot.dsk --hd "/path/System 7.5.3 HD.dsk" \
-    [--extra ~/macapps] [--size 2880K|floppy] [--exclude NAME] [--include NAME] \
-    [--prep] [--out ROM/custom_753.dsk]
-```
-
-- `--size`: default 2880K (the flash budget allows ~2.89 MB: app partition 0x3F0000
-  minus ~1.10 MB code and the 512 KB ROM). `floppy` = 1440K, dropping the
-  lowest-priority manifest items until it fits.
-- `--prep` (recommended, WSL/Linux): boots the new image once in the host harness
-  (LC II build, `LC-II.ROM` must be in the output folder) with the disk writable
-  (`macemu --disk-rw`), lets the Finder build the desktop database (real icons on the
-  read-only volume), then shuts down cleanly. Without it the Finder shows generic icons.
-- WindowShade is `optional` (`--include WindowShade`): its INIT corrupts memory on the
-  Classic build (opening General Controls then crashes); it works on the LC II.
-
-Then set `DISK_NAME "custom_753.dsk"` in `main/CMakeLists.txt` (host:
-`make DISK_NAME=custom_753.dsk`, with its own `BUILD=` dir). The image is served through
-the floppy path (.Sony drive 1) at any size; it is read-only: writes fail with wPrErr
-and the volume mounts locked (Note Pad says "the file could not be opened"; Stickies
-opens without saving).
-
-## Regenerating Musashi Opcode Tables
-
-Only needed if you modify `m68k_in.c` (e.g., to add custom instructions):
+`m68kops.c` and `m68kops.h` are generated from `m68k_in.c` and committed, so a
+fresh clone builds without this step. To regenerate:
 
 ```bash
 cd MacintoshESPEmulator/components/musashi
@@ -125,42 +30,127 @@ gcc -o m68kmake m68kmake.c
 ./m68kmake . m68k_in.c
 ```
 
-This generates `m68kops.c` (~836KB, ~37,000 lines) and `m68kops.h` from the opcode DSL.
+`m68k_in.c` already puts `EXT_RAM_BSS_ATTR` on the two big tables, so the
+output is ready to use (without it `.dram0.bss` overflows by ~434 KB).
+`m68kmake` does not read `m68kconf.h`: changing a config switch needs no
+regeneration.
 
-**After regeneration**: You must re-add the `EXT_RAM_BSS_ATTR` patch to `m68kops.c` (search for `m68ki_instruction_jump_table` and `m68ki_cycles` near line 34715).
+## Build variables
 
-## Host Harness (PC build for debugging)
+In `MacintoshESPEmulator/main/CMakeLists.txt`:
 
-`MacintoshESPEmulator/host/` builds the same emulator core for x86 Linux/WSL with ESP-IDF
-shims, so boot problems can be debugged in seconds:
+| Variable | Committed default | Effect |
+|---|---|---|
+| `ROM_NAME` | `LC-II.ROM` | `Classic.ROM` → Classic build (`MAC_ROM_LC_II=0`); `LC-II.ROM` → LC II (`MAC_ROM_LC_II=1`, `MAC_V8_CUDA=0`); `Color-Classic.ROM` → `MAC_V8_CUDA=1` |
+| `DISK_NAME` | `OS_750_boot.dsk` | Disk image in `ROM/` to embed; `DISK_SYM` is derived from it. If the file is missing the Mac boots to the "?" disk icon |
+
+`MUSASHI_HOT_IRAM` (ON) is set in `components/musashi/CMakeLists.txt`. All
+other switches are C defines; the list with defaults is in
+[`CLAUDE.md`](../CLAUDE.md#build-switches).
+
+## Building on Windows (`build.bat`)
+
+ESP-IDF rejects MSYS/MinGW shells (Git Bash, MSYS2). `build.bat` sets
+`IDF_PATH`, `IDF_TOOLS_PATH`, the Python venv and `PATH`, clears the MSYS
+variables, sets `ESP_IDF_VERSION=6.1.0`, and runs `idf.py` with your
+arguments. Edit the paths at its top if your install differs.
+
+From `cmd.exe`:
+
+```bat
+cd MacintoshESPEmulator
+build.bat set-target esp32      (first time, and after fullclean)
+build.bat build
+build.bat -p COM3 flash
+build.bat -p COM3 monitor
+build.bat size
+build.bat fullclean
+```
+
+From a bash shell (Git Bash or WSL), wrap the call:
+
+```bash
+cmd.exe //C "E:\\Personal\\Macintosh\\MacintoshESPEmulator\\build.bat build"
+```
+
+The board's USB-UART is a CH340; install its driver if no COM port appears.
+`tools/serial_watch.py` (pyserial, COM3) captures the log to
+`tools/serial_watch.log`. Close it before flashing: it holds the port.
+
+## Project configuration
+
+`sdkconfig.defaults`:
+- `CONFIG_IDF_TARGET="esp32"`, CPU 240 MHz, FreeRTOS 1000 Hz.
+- Flash **4 MB, 80 MHz, QIO** (QIO measured +1.1% vs DIO; the image header
+  still says "dio" and the bootloader switches to QIO).
+- PSRAM quad 80 MHz, `CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y` (for
+  `EXT_RAM_BSS_ATTR`).
+- `CONFIG_COMPILER_OPTIMIZATION_PERF=y`, custom partition table.
+
+`partitions.csv`: `nvs` 0x9000 (24 KB), `phy_init` 0xF000, `factory` app at
+0x10000, size **0x3F0000**. With the 2880K custom disk the firmware is about
+0x3E18F0, so there is almost no room left; with the 1.44 MB floppy there is
+about 1.4 MB free.
+
+ROM and disk are embedded with `EMBED_FILES` and linked into `.rodata` as
+`_binary_<ROM_NAME>_start/end` and `_binary_<DISK_SYM>_start/end` (for
+example `_binary_OS_750_boot_dsk_start`).
+
+## Custom boot disk
+
+`tools/build_disk.py` builds a bare HFS System 7.5.3 volume. It contains no
+Apple data: everything is copied from images you supply.
+
+- From the **base** floppy: System, Finder, Finder Preferences, boot blocks.
+- From `--hd` (a full 7.5.3 hard-disk image, bare HFS or partitioned): the
+  `MANIFEST` items (Calculator, Key Caps, Note Pad, Scrapbook, Shut Down,
+  control panels, SimpleText, ...).
+- From `--extra` (repeatable): your apps as MacBinary `.bin` files, HFS images
+  or folders of them, copied to `Applications`.
+- A built-in hard-disk volume icon (`--no-volume-icon` skips it), Finder
+  window positions that fit 480×320, and a Control Panels alias in the Apple menu.
+
+```bash
+pip install machfs            # or --pylib DIR with an unpacked machfs/macresources
+python3 tools/build_disk.py ROM/OS_750_boot.dsk --hd "/path/System 7.5.3 HD.dsk" \
+    [--extra ~/macapps] [--size 2880K|floppy|<n>K] [--exclude NAME] [--include NAME] \
+    [--name "Macintosh HD"] [--prep] [--out ROM/custom_753.dsk]
+```
+
+- `--size`: default 2880K, the most that fits the flash budget (~2.89 MB =
+  app partition minus code and the 512 KB ROM). `floppy` = 1440K, dropping the
+  lowest-priority manifest items until the volume fits.
+- `--prep` (recommended; WSL/Linux with gcc): boots the new image once in the
+  host harness (LC II build; `LC-II.ROM` must be in the output folder) with the
+  disk writable, lets the Finder build the desktop database, and shuts down
+  cleanly. Without it the Finder shows generic icons.
+- `--include WindowShade`: optional, because its INIT corrupts memory on the
+  Classic build (General Controls then crashes). It works on the LC II.
+
+Then set `DISK_NAME "custom_753.dsk"` (host: `make DISK_NAME=custom_753.dsk
+BUILD=build_cd`). Any size up to the flash budget mounts through the floppy
+path (.Sony drive 1) on both machines.
+
+## Host harness
 
 ```bash
 cd MacintoshESPEmulator/host
-make -j16                 # build/macemu
-make run                  # 3000 frames, PNG screenshots in out/, RAM dump
-make TRACE=1 -j16         # build_trace/macemu with --trace N (per-instruction log)
+make -j16           # build/macemu (LC II by default; MAC_ROM_LC_II=0 for the Classic)
+make run            # 3000 frames, PNG screenshots in out/, RAM dump
+make TRACE=1 -j16   # per-instruction trace and profiler
 ```
 
-See `host/README.md` for all options. The host has no touch, runs on a single thread, and
-uses plain RAM instead of PSRAM, so speed and timing must still be checked on the board.
-
-## Flash Mode
-
-`sdkconfig.defaults` selects QIO flash (measured +1.1% emulation speed vs DIO on this
-board). ESP-IDF still writes "dio" in the image header; the bootloader switches to QIO.
+All options: [`host/README.md`](../MacintoshESPEmulator/host/README.md).
 
 ## Troubleshooting
 
-### "MSYS/MinGW shell is not supported"
-You're running from Git Bash or similar. Use `cmd.exe //C build.bat` instead.
-
-### "ESP_IDF_VERSION not set"
-The `build.bat` already sets this. If running manually, add `set ESP_IDF_VERSION=6.0.0`.
-
-### DRAM overflow at link time
-Musashi's large tables (580KB) must be in PSRAM. Ensure:
-- `CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y` in sdkconfig
-- `EXT_RAM_BSS_ATTR` on `m68ki_instruction_jump_table` and `m68ki_cycles` in `m68kops.c`
-
-### GCC 15.2.0 warnings in Musashi
-The Xtensa GCC 15.2.0 is stricter than older versions. Warning suppressions are in `components/musashi/CMakeLists.txt`. If new warnings appear, add the corresponding `-Wno-*` flag there.
+| Symptom | Fix |
+|---|---|
+| "MSYS/MinGW shell is not supported" | Run through `cmd.exe` and `build.bat` |
+| "Musashi: m68kops.c and/or m68kops.h not found" | Generate them (above) |
+| `.dram0.bss` overflow at link | `EXT_RAM_BSS_ATTR` missing on the Musashi tables, or `CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY` off |
+| IRAM overflow | Trim `components/musashi/hot_iram.lf` or set `MUSASHI_HOT_IRAM` OFF |
+| App partition overflow | Disk image too big: use a smaller `--size` or the 1.44 MB floppy |
+| "?" disk icon | `DISK_NAME` file not found in `ROM/` at configure time (re-run the build after adding it) |
+| Flash fails, port busy | Close serial monitors / `serial_watch.py` |
+| New GCC warnings in Musashi | Add `-Wno-*` flags in `components/musashi/CMakeLists.txt` |

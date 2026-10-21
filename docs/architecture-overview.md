@@ -1,129 +1,169 @@
-# Architecture Overview
+# Architecture overview
 
-## System Diagram
+How the emulator is put together. Related documents:
+[memory map](memory-map.md), [CPU core](musashi-integration.md),
+[peripherals](peripherals.md), [display and touch](display-pipeline.md),
+[hardware](hardware.md), [build guide](build-guide.md).
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    ESP32-WROVER-B (WT32-SC01-3.4)           │
-│                                                             │
-│  Core 0 (FreeRTOS)           Core 1 (Emulator Task)        │
-│  ┌──────────────┐            ┌──────────────────────┐       │
-│  │  app_main()  │            │  mac_emu_run()       │       │
-│  │  Display init│───start───>│                      │       │
-│  │  Emu init    │            │  ┌────────────────┐  │       │
-│  │  Idle loop   │            │  │ Musashi 68000  │  │       │
-│  └──────────────┘            │  │ CPU Emulator   │  │       │
-│                              │  └───────┬────────┘  │       │
-│                              │          │           │       │
-│                              │  ┌───────▼────────┐  │       │
-│                              │  │ Memory Bus     │  │       │
-│                              │  │ (mac_memory.c) │  │       │
-│                              │  └──┬──┬──┬──┬──┬─┘  │       │
-│                              │     │  │  │  │  │    │       │
-│                              │  ┌──▼──▼──▼──▼──▼─┐  │       │
-│                              │  │RAM│ROM│VIA│SCC│IWM│ │       │
-│                              │  └──┬────────────┘  │       │
-│                              │     │               │       │
-│                              │  ┌──▼─────────────┐ │       │
-│                              │  │ Video Render   │ │       │
-│                              │  │ (mac_video.c)  │ │       │
-│                              │  └──────┬─────────┘ │       │
-│                              └─────────┼───────────┘       │
-│                                        │                   │
-│  ┌─────────────────────────────────────▼─────────┐         │
-│  │            Display Driver (display.cpp)        │         │
-│  │         SPI DMA → ST7796 480x320 LCD           │         │
-│  │         I2C → FT5x06 Touch Controller          │         │
-│  └────────────────────────────────────────────────┘         │
-│                                                             │
-│  ┌──────────────────────────┐  ┌────────────────────────┐   │
-│  │ Internal SRAM (~365KB)   │  │ PSRAM (8MB, 4MB usable)│   │
-│  │  - FreeRTOS stacks       │  │  - Mac RAM (2MB)       │   │
-│  │  - DMA line buffer       │  │  - Disk image (1.44MB) │   │
-│  │  - ESP-IDF runtime       │  │  - Musashi tables      │   │
-│  │  - ~302KB DMA-capable    │  │    (580KB, BSS)        │   │
-│  └──────────────────────────┘  └────────────────────────┘   │
-│                                                             │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │ Flash (4MB — actual, not 16MB as labeled)            │   │
-│  │  - Bootloader + partition table                      │   │
-│  │  - Application firmware (~2.4MB)                     │   │
-│  │  - Embedded Classic.ROM (512KB, .rodata)             │   │
-│  │  - Embedded OS_750_boot.dsk (1.44MB, .rodata)        │   │
-│  │  - 1.7MB free in partition                           │   │
-│  └──────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────┘
-```
+New to the project? Start with the [learning guide](learn/README.md), which
+explains the hardware, the emulated Macs and the performance work step by
+step; this page is the reference.
 
-## Emulation Loop
+## Two machines, one codebase
 
-The emulator runs a frame-based loop at ~60Hz on Core 1:
+| | Mac Classic | LC II (V8) |
+|---|---|---|
+| Build | `ROM_NAME "Classic.ROM"` → `MAC_ROM_LC_II=0` | `ROM_NAME "LC-II.ROM"` → `MAC_ROM_LC_II=1`, `MAC_V8_CUDA=0` |
+| CPU | 68000 (Musashi) | 68030 (Musashi, PMMU instruction stub) |
+| Screen | 1-bit framebuffer in Mac RAM, visible area patched to 480×320 | VRAM at $F40000, 1–16 bpp through the CLUT, 512×384 mode patched to 480×320 |
+| ADB / clock / PRAM | VIA shift register bypass + RTC chip (`mac_rtc.c`) | Egret HLE (`mac_egret.c`) |
+| Floppy | SWIM ISM emulation + .Sony Device Manager intercepts | .Sony Prime hook (`mac_v8disk.c`) |
+| Clicks | C mirror of the ROM's PostEvent | Emulated ADB mouse button |
+
+The Color Classic ROM (`MAC_V8_CUDA=1`, Cuda instead of Egret) uses the same V8
+code and is kept as a reference. Most V8 code is shared; Classic-only code is
+under `#if !MAC_ROM_LC_II`.
+
+## Task model
 
 ```
-Each frame (~16.6ms):
-  1. Execute ~130,560 CPU cycles (7.83MHz / 60Hz)
-     - Run in slices of 1000 cycles
-     - After each slice: tick VIA timers, check/raise IRQs
-  2. Trigger VBlank interrupt (VIA CA1)
-  3. Render framebuffer to display
-     - Read 1-bit pixels from Mac RAM
-     - Convert 512x342 → 480x320 RGB565 (nearest-neighbor)
-     - Send via SPI DMA in 20-line chunks
-  4. Poll touch input → update mouse position
-  5. Frame-rate limit (sleep if ahead of schedule)
+            Core 0                                 Core 1
+ app_main(): display_init, mac_emu_init
+ mac_video_task  (renderer)                 mac_emu_run()  (emulation loop)
+ touch sampler task (~60 Hz, I2C)             Musashi m68k_execute() slices
+        │  touch_consume() once per frame ◄──     device ticks (VIA, Egret, SWIM)
+        │  reads Mac RAM / VRAM            ──►    VBL, frame-end touch + disk updates
+        ▼                                         idle fast-forward, throttle
+ esp_lcd SPI DMA → ST7796S
 ```
 
-## Source File Map
+`main.cpp` starts the emulation task on core 1 and the renderer plus the touch
+sampler on core 0. The renderer reads Mac memory without locking; it only
+reads.
 
-| File | Purpose | Lines |
-|------|---------|-------|
-| `main/main.cpp` | Entry point, display init, launches emu task on Core 1 | ~67 |
-| `main/mac_emulator.c` | Frame loop, ROM/disk loading, touch→mouse | ~169 |
-| `main/mac_memory.c` | 24-bit address bus decode, Musashi read/write callbacks | ~252 |
-| `main/mac_video.c` | 1-bit→RGB565 conversion, chunked DMA rendering | ~101 |
-| `main/mac_via.c` | VIA 6522: timers, interrupts, overlay control | ~260 |
-| `main/mac_scc.c` | SCC stub (returns safe defaults) | ~48 |
-| `main/mac_iwm.c` | IWM floppy controller (sense lines, basic status) | ~143 |
-| `components/musashi/` | Musashi 68000 CPU core (third-party, copied) | ~37K |
-| `components/display/display.cpp` | ST7796 SPI + FT5x06 I2C driver | ~187 |
+## Frame loop (`mac_emu_run`)
 
-## Component Dependencies
+One frame = one 60.15 Hz VBL = `MAC_CYCLES_PER_VBLANK` (7,833,600 / 60 ≈
+130,560) cycles of **device time**.
 
-```
-main
-├── display (esp_lcd, SPI, I2C, GPIO)
-├── musashi (standalone, log)
-├── freertos
-├── esp_timer
-└── esp_psram
+1. Run the CPU in slices. Early boot uses 1-cycle slices, disk transfers 10,
+   then 1000, and after frame 2000 `fast_slice` = 4000 (divided by
+   `MAC_CYCLE_SCALE`). After each slice: `via_tick()`, Egret/SWIM ticks, IRQ
+   update, PC-keyed boot workarounds. **`fast_slice` must stay ≤ 4000**: VIA T2
+   periods are often 100–2000 cycles and longer slices miss underflows.
+2. On V8, the CPU gets `MAC_CYCLES_PER_VBLANK / MAC_V8_CYCLE_SCALE` cycles per
+   frame and each CPU cycle advances device time by the scale (default 2).
+   Musashi's 68030 timings are about half the 68000's, so this keeps the LC II's
+   instructions per tick close to the Classic's while timers stay real-time.
+3. VBL fires mid-frame (VIA CA1; V8 also the slot VBL in pseudo-VIA2).
+4. Frame end: touch report applied (cursor globals, button), V8 disk hook
+   refreshed, low-memory checks.
+5. **Idle fast-forward** (`MAC_IDLE_FF`): if the Mac is provably only waiting
+   (Process Manager idle loop seen through the A-line hook with no interrupt
+   since the previous pass, or a `CMP.L Ticks,Dn / Bcc *-4` loop), the rest of
+   the spin is not emulated: device time advances in `fast_slice` chunks until
+   an interrupt above the SR mask is pending. Ticks per frame are unchanged.
+6. **Throttle** (`MAC_FRAME_THROTTLE`): at most one frame per 16.626 ms of wall
+   clock, so a cheap idle frame does not run faster than real time.
 
-display
-├── esp_lcd (panel IO, panel ops)
-├── esp_driver_spi
-├── esp_driver_gpio
-├── esp_driver_i2c
-└── freertos (semaphore for DMA sync)
+`SPEED`, `PROFILE` and `IDLE-FF:` lines are logged every 300 frames.
 
-musashi
-└── log (ESP_LOG only)
-```
+## Source map
 
-## Memory Budget (verified on hardware)
+| File | Purpose |
+|---|---|
+| `main/main.cpp` | Entry point: display init, emulator init, tasks |
+| `main/mac_emulator.c/.h` | Frame loop, ROM/disk setup, boot workarounds, touch apply, click posting, game mode, idle fast-forward |
+| `main/mac_memory.c/.h` | Address decode for both maps, Musashi callbacks, ROM patches, .Sony intercepts |
+| `main/mac_via.c/.h` | VIA 6522 (VIA1 on V8): timers, IRQs, overlay latch, ports |
+| `main/mac_egret.c/.h` | Egret/Cuda HLE: ADB mouse, RTC, PRAM, IIC, 1 Hz ticks |
+| `main/mac_rtc.c/.h` | Classic RTC/PRAM chip on VIA port B |
+| `main/mac_iwm.c/.h` | IWM/SWIM: sense lines, ISM registers, MFM byte stream |
+| `main/mac_v8disk.c/.h` | V8 .Sony Prime replacement |
+| `main/mac_disk_overlay.c/.h` | Copy-on-write disk overlay in PSRAM |
+| `main/mac_v8video.c/.h` | V8 VRAM, VDAC/CLUT, pseudo-VIA2, ROM video patch |
+| `main/mac_video.c/.h` | Renderer (Classic 1-bit and V8 CLUT paths), dirty strips |
+| `main/mac_touch.c/.h` | Touch gestures and sampler task |
+| `main/mac_scsi.c/.h` | NCR 5380 with an empty bus |
+| `main/mac_scc.c/.h` | Z8530 stub |
+| `components/musashi/` | Musashi core, `m68kmmu.h` PMMU stub, `mac_native.c` native speed-ups, `hot_iram.lf` |
+| `components/display/display.cpp` | ST7796S (esp_lcd SPI) and FT5x06 (I2C) |
+| `host/` | x86 harness: shims, `host_main.c`, `host_prof.c` ([README](../MacintoshESPEmulator/host/README.md)) |
 
-| Resource | Used | Available | Notes |
-|----------|------|-----------|-------|
-| DRAM (.data+.bss) | 16KB | 180KB | Minimal after moving tables to PSRAM |
-| IRAM (.text) | 60KB | 131KB | ISR handlers, cache workarounds |
-| Flash (.text+.rodata) | 2.4MB | 3.9MB partition | Includes embedded ROM (512KB) + disk (1.44MB) |
-| PSRAM (static BSS) | 580KB | — | Musashi opcode/cycle tables |
-| PSRAM (heap at boot) | ~3.4MB | ~4MB usable | 2MB Mac RAM + 1.44MB disk image (writable copy) |
-| App partition | 2.4MB | 3.9MB | 41% free (1.7MB headroom) |
-| Internal SRAM (free) | — | ~365KB | 302KB DMA-capable |
+## Memory placement
 
-### Disk Image Strategy
+| Region | Contents |
+|---|---|
+| Flash (4 MB, app partition 0x3F0000) | Code, ROM image (512 KB, or 1 MB Color Classic), disk image (1.44–2.88 MB) in `.rodata` via `EMBED_FILES` |
+| IRAM | `m68k_execute` + 128 hottest opcode handlers, memory callbacks, lean fetch path (~77.5 KB used) |
+| PSRAM (~4 MB addressable) | Mac RAM 2 MB, Musashi jump/cycle tables ~580 KB, V8 VRAM 512 KB, disk overlay pool 384/256 KB |
+| Internal DMA RAM | 19.2 KB render line buffer |
 
-The 1.44MB disk image is embedded in flash (.rodata) but **copied to PSRAM at boot**. This serves two purposes:
-1. The flash copy is read-only; the PSRAM copy is writable (needed for disk writes/OS installation)
-2. RAM-resident disk is faster to access than flash for random reads
+The disk image stays in flash; it is not copied to PSRAM. Writes go to the
+overlay ([peripherals](peripherals.md#disk-overlay)).
 
-Future: A virtual SCSI hard drive could use remaining PSRAM or a dedicated flash partition as a persistent disk target for OS installation.
+## Boot path
+
+**Classic:** reset vectors through the overlay → first VIA ORA write clears the
+overlay (one-shot latch) → memory/hardware tests (with workarounds) → SWIM
+init → boot blocks and System file read through .Sony intercepts → INITs →
+`_InitWindows` → Finder. From frame 2000 (`mac_post_boot`) the lean
+instruction-fetch path is used.
+
+**LC II:** 68030 reset → overlay clears on the first access to $A00000 → Egret
+handshake (HLE) → RAM sizing (2 MB, $FF above) → video (sense code 2, VPBlocks
+patched to 480×320) → .Sony Open, then reads through the Prime hook → System
+7.5.3 → Finder.
+
+### Classic boot workarounds (history)
+
+The Classic boot needed targeted workarounds where the emulator lacks hardware
+or where early emulation bugs had to be bridged. Most are still in the code
+(Classic only) and keyed to ROM addresses:
+
+| Workaround | Why |
+|---|---|
+| Overlay one-shot latch on the first ORA write | Later ORA writes (sound, screen select) must not re-map ROM |
+| D6 = 0 at $401CF0/$401D80/$401D96 | Memory test result (safety net) |
+| Serial debug monitor escape to $401F2C | The ROM's SCC monitor loop has no exit |
+| SCSI polling bypass at $41A44A, SCSI reads $00 during boot | No SCSI devices; prevents a SCSI Manager allocation that crashed INIT loading |
+| .Sony Device Manager intercepts ($40315C read, ctl/stat), DM-spin rescue ($4031BE), `.Sony _Write` ($4031CC) | Disk I/O served from flash/overlay |
+| ADB completion flag $08446C, PB4/PB5 high, SR interrupt emulation | No ADB transceiver |
+| StartUpScreen BNE→BRA | Missing DSAT resource |
+| UNIMP handler at $400768 | Unimplemented traps return cleanly |
+| SCC RR0 Sync/Hunt bit | LocalTalk INIT polls it |
+| ROM checksum and RAM test skips (Mini vMac approach) | ROM is patched; RAM test is slow |
+
+Debugging history in brief: overlay latch → "?" floppy icon → SWIM ISM sector
+reads → ADB/LocalTalk/StartUpScreen stalls → Finder (April 2026) → speed work
+and touch trackpad → event-queue clicks → 68030/V8 bring-up, Egret, video,
+native 480×320 (October 2026) → native speed-ups, writable overlay, game mode.
+Full record: [`spec/performance-roadmap.md`](../spec/performance-roadmap.md).
+
+## Background reading
+
+- 68000: *M68000 Family Programmer's Reference Manual* (Motorola). 68030:
+  *MC68030 User's Manual* (PMMU, cache instructions).
+- Mac hardware: *Guide to the Macintosh Family Hardware* (Apple, 2nd ed.).
+- Mac OS internals: *Inside Macintosh* (low-memory globals, trap dispatch,
+  Memory/Resource/Event Managers, Device Manager).
+- ESP32: ESP-IDF Programming Guide and the ESP32 Technical Reference Manual
+  (PSRAM cache, SPI DMA, IRAM).
+- Reference emulators: Mini vMac (Classic ROM patches), MAME (V8, Egret, Cuda).
+
+## Glossary
+
+| Term | Meaning |
+|---|---|
+| A-line trap | `$Axxx` opcode; Mac OS system call via the trap dispatcher |
+| ADB | Apple Desktop Bus (keyboard/mouse) |
+| Egret / Cuda | 6805 microcontrollers on V8 Macs: ADB, RTC, PRAM, power (LC II = Egret, Color Classic = Cuda) |
+| HLE | High-level emulation: behaviour emulated, not the MCU's code |
+| ISM | SWIM's MFM register interface |
+| Overlay | ROM mirrored at address 0 after reset |
+| PRAM | Parameter RAM (settings kept by the clock chip) |
+| PSRAM | External SPI RAM on the ESP32-WROVER module |
+| V8 | Apple's LC II / Color Classic system chip (memory controller + video) |
+| VBL | Vertical blank interrupt, 60.15 Hz |
+| VIA | MOS 6522 Versatile Interface Adapter |
+| VPBlock | Slot Manager video parameter block (mode size, rowBytes, depth) |

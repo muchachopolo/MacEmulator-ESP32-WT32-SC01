@@ -1,218 +1,252 @@
-# Macintosh Classic Emulator for ESP32
+# Macintosh emulator for ESP32 (WT32-SC01) — contributor and agent guide
 
-## Project Overview
+A 68k Macintosh emulator (Musashi CPU core) for the WT32-SC01 v3.4 board
+(ESP32-WROVER-B, ST7796S 480×320 SPI LCD, FT5x06 touch). User-facing overview:
+`README.md`. **The ordered plan and current state live in
+`spec/next-steps-plan.md`**; history and measurements in
+`spec/performance-roadmap.md`. Detailed docs: `docs/`.
 
-A Macintosh Classic emulator running on the WT32-SC01-3.4 board (ESP32-WROVER-B).
-Emulates a 68000 CPU via Musashi, with 512x342 monochrome display scaled to 480x320 RGB565 on an ST7796 SPI LCD with FT5x06 capacitive touch.
+## Ground rules
 
-**Two targets** (selected by `ROM_NAME` in `main/CMakeLists.txt`):
-- **Classic.ROM** (68000, mono): the working build and fallback. Last fully working commit: c9abaef. Same 512KB ROM size as LC-II.ROM. If LC II at 1-bit measures as fast as Classic, LC II replaces it (one build: 1-bit for speed, colour on demand).
-- **V8 / 68030** (`MAC_ROM_LC_II=1`, colour-capable): in progress. **Build uses LC-II.ROM** (user decision 2026-10-20; `MAC_V8_CUDA=0`, Egret). Color-Classic.ROM remains selectable (`MAC_V8_CUDA=1`, Cuda) only as a reference. Done: Egret/Cuda HLE (`main/mac_egret.c`), 68030 MMU instruction stub (no translation), V8 video hardware (`main/mac_v8video.c`, VRAM $F40000). V8 floppy via a .Sony Prime hook (`main/mac_v8disk.c`), VRAM/CLUT renderer, and a native **480×320** mode patched into the ROM's video declaration blocks (1:1 on the LCD). On the host the LC II boots System 7.5.3 to the Finder. Still unverified on hardware: panel colour order, speed, and touch/mouse on V8. See `spec/performance-roadmap.md` → "Phase 2 attempt 4" and "ROM choice reassessment".
+- **Host first.** Debug emulation logic on the x86 host harness
+  (`MacintoshESPEmulator/host/`); flash the board only to confirm a fix or to
+  measure speed. Only the main session flashes the board.
+- **Never commit ROMs or disk images** (Apple copyright). `ROM/` is git-ignored;
+  never publish built firmware (it embeds the ROM and disk).
+- **Commit with the defaults** `ROM_NAME "LC-II.ROM"` and
+  `DISK_NAME "OS_750_boot.dsk"` in `main/CMakeLists.txt`, even if you build
+  locally with other values.
+- **No `Co-Authored-By` lines** in commit messages.
+- Measure speed as ESP32 exec cycles per 300 frames or wall-clock per task
+  (boot-to-Finder seconds), never real-time % across different machines.
+- Every native replacement must be byte-identical (RAM dumps + screenshots on the
+  host) with its switch ON vs OFF, and gets its own switch.
+- Decode `4E FA` as `JMP d16(PC)`.
+- Parallel agents: separate host `BUILD=` dirs and scratch dirs, clear file ownership.
 
-**Next work:** follow `spec/next-steps-plan.md` (ordered plan: commit/cleanup → board A/B incl. an open idle-speed regression → keyboard → native trap acceleration). Work through 2026-10-21 is committed on branch `phase2-lc2-native` (not yet merged to main).
+## Repository layout
 
-**Current status (Classic build)**: System 7.5.3 Finder launches and runs stably with trackpad-style touch input and working mouse clicks. Full boot sequence completes (ROM self-test → boot block → System file → INITs → _InitWindows → _Launch → Finder). Speed: 39-91% real-time (peak ~91% at idle, 57-67% during boot). Touch screen works as relative trackpad (swipe to move cursor without clicking, tap to click, tap-then-drag for click-and-drag).
-
-## Repository Layout
+Repo root: `E:\Personal\Macintosh` (WSL: `/mnt/e/Personal/Macintosh`).
 
 ```
-D:\Personal\Macintosh\
-├── MacintoshESPEmulator/     # ESP-IDF project (the emulator)
-│   ├── main/                 # Application source code
-│   │   ├── mac_emulator.c    # Main emulation loop + boot bypasses
-│   │   ├── mac_memory.c      # Memory map + trap intercepts + disk I/O
-│   │   ├── mac_via.c         # VIA 6522 (timers, interrupts, ADB, overlay)
-│   │   ├── mac_scsi.c         # NCR 5380 SCSI controller (arbitration, no devices)
-│   │   ├── mac_scc.c         # SCC Z8530 stub (serial ports)
-│   │   ├── mac_iwm.c         # IWM/SWIM floppy controller
-│   │   ├── mac_video.c       # Framebuffer → LCD rendering (core 0)
-│   │   └── main.cpp          # ESP-IDF entry point (C++ for display driver)
-│   ├── components/
-│   │   ├── musashi/          # Musashi 68000 CPU emulator (copied source)
-│   │   └── display/          # Native esp_lcd display driver
-│   ├── host/                 # x86 host harness: same core + ESP-IDF shims (fast debugging)
-│   ├── build.bat             # ESP-IDF v6.1 build wrapper (must use cmd.exe)
-│   ├── partitions.csv        # Custom partition table (4MB flash)
-│   └── sdkconfig.defaults    # SDK configuration
-├── ROM/                      # ROM and disk images (not in git, gitignored)
-│   ├── Classic.ROM           # 512KB Mac Classic ROM (required)
-│   ├── OS_750_boot.dsk       # 1.44MB System 7.5.3 boot floppy
-│   ├── Color-Classic.ROM     # 1MB, 68030 V8-family (current V8 bring-up ROM)
-│   └── LC-II.ROM             # 512KB, 68030 V8-family, complete dump (planned V8 ROM)
-├── board_test/               # Hardware diagnostic project
-├── docs/                     # Architecture documentation
-├── tools/                    # ROM analysis & disk parsing scripts
-├── *.py                      # ROM dump/trace utilities
-└── *.pdf                     # Board/chip datasheets
+MacintoshESPEmulator/        ESP-IDF project
+  main/                      emulator (C) + main.cpp (entry point)
+  components/musashi/        Musashi 68k core (copied, patched) + mac_native.c
+  components/display/        esp_lcd ST7796 + FT5x06 driver
+  host/                      x86 host harness (Makefile, shims, profiler)
+  build.bat                  ESP-IDF v6.1 wrapper (run via cmd.exe)
+  partitions.csv             4 MB flash: one 0x3F0000 factory app partition
+ROM/                         ROMs + disk images (git-ignored, user-supplied)
+tools/                       build_disk.py, dis68k.py, romcheck.py, serial_watch.py, HFS parsers
+board_test/                  hardware diagnostic project
+docs/                        architecture, build, hardware, memory map, CPU, peripherals, display
+spec/                        next-steps-plan.md (plan), performance-roadmap.md (history)
 ```
 
-## Build System
+## Machines and build variables
 
-**ESP-IDF v6.0** installed via EIM at `C:\esp\v6.0\esp-idf`, tools at `C:\Espressif\tools`.
+One codebase, two machine targets, picked in `main/CMakeLists.txt`:
 
-### CRITICAL: ESP-IDF v6.0 rejects MSYS/MinGW shells
+| `ROM_NAME` | Machine | Derived defines |
+|---|---|---|
+| `LC-II.ROM` (committed default) | LC II: 68030, V8 chipset, Egret, colour | `MAC_ROM_LC_II=1`, `MAC_V8_CUDA=0` |
+| `Classic.ROM` | Mac Classic: 68000, 1-bit | `MAC_ROM_LC_II=0` |
+| `Color-Classic.ROM` | Color Classic (reference only, 1 MB ROM, Cuda) | `MAC_ROM_LC_II=1`, `MAC_V8_CUDA=1` |
 
-You MUST build via `cmd.exe`, not bash. Use the wrapper:
+`DISK_NAME` (default `OS_750_boot.dsk`) selects the disk image in `ROM/`;
+`DISK_SYM` is its C identifier. `custom_753.dsk` (2880K) comes from
+`tools/build_disk.py`. ROM checksums: Classic `A49F9914`, LC II `35C28F5F`,
+Color Classic `ECD99DC0`.
+
+The host Makefile mirrors this: `make MAC_ROM_LC_II=0` (Classic),
+`make MAC_V8_CUDA=1` (Color Classic), `make DISK_NAME=custom_753.dsk BUILD=build_cd`,
+`make EXTRA_DEFS="-DSWITCH=0"`. Objects do not track make variables: use a
+separate `BUILD=` dir per configuration.
+
+## Building
+
+ESP-IDF **v6.1** at `C:\esp\v6.1\esp-idf`, tools at `C:\Espressif\tools`.
+ESP-IDF rejects MSYS/MinGW shells: always go through `build.bat` via `cmd.exe`.
 
 ```bash
-cmd.exe //C "D:\\Personal\\Macintosh\\MacintoshESPEmulator\\build.bat build"
-cmd.exe //C "D:\\Personal\\Macintosh\\MacintoshESPEmulator\\build.bat flash"
-cmd.exe //C "D:\\Personal\\Macintosh\\MacintoshESPEmulator\\build.bat monitor"
-cmd.exe //C "D:\\Personal\\Macintosh\\MacintoshESPEmulator\\build.bat size"
-cmd.exe //C "D:\\Personal\\Macintosh\\MacintoshESPEmulator\\build.bat fullclean"
-cmd.exe //C "D:\\Personal\\Macintosh\\MacintoshESPEmulator\\build.bat set-target esp32"
+cmd.exe //C "E:\\Personal\\Macintosh\\MacintoshESPEmulator\\build.bat build"
+cmd.exe //C "E:\\Personal\\Macintosh\\MacintoshESPEmulator\\build.bat -p COM3 flash"
+cmd.exe //C "E:\\Personal\\Macintosh\\MacintoshESPEmulator\\build.bat size"
+cmd.exe //C "E:\\Personal\\Macintosh\\MacintoshESPEmulator\\build.bat fullclean"   # then set-target esp32
 ```
 
-After `fullclean`, you must run `set-target esp32` before building.
+Serial port **COM3** (CH340). `tools/serial_watch.py` logs it to
+`tools/serial_watch.log`; kill stale watcher processes before flashing (they
+hold the port).
 
-### Host harness (debug on the PC first)
+Musashi's generated `m68kops.c/.h` are **committed** (so clones build); after editing `m68k_in.c` regenerate with
+`gcc -o m68kmake m68kmake.c && ./m68kmake . m68k_in.c` in
+`components/musashi/`. `m68k_in.c` carries `EXT_RAM_BSS_ATTR` on the two big
+tables (without it `.dram0.bss` overflows by ~434 KB). `m68kmake` ignores
+`m68kconf.h`, so a config flip needs no regeneration.
 
-`MacintoshESPEmulator/host/` compiles the unmodified `main/mac_*.c` + Musashi for x86 (WSL gcc) against small ESP-IDF shims. 3000 frames run in under 1 s, versus minutes on the board. It writes LCD screenshots as PNG, can dump RAM, and `make TRACE=1` gives a per-instruction trace. Debug emulation logic here; flash the board only to confirm fixes and to measure speed. See `host/README.md`.
+### Host harness
 
 ```bash
-cd MacintoshESPEmulator/host && make -j16 && make run
+cd MacintoshESPEmulator/host && make -j16 && make run         # 3000 frames, PNGs in out/
 make TRACE=1 -j16 && ./build_trace/macemu --frames 600 --trace 100000 --log emu.log
+make BUILD=build_prof TRACE=1 -j16 && ./build_prof/macemu --vclock 120 --profile-from 12000 --profile-to 20000
 ```
 
-### Musashi Code Generation
+Options (`--tap`, `--swipe`, `--stop-pc`, `--watch`, `--disk-rw`, `--disk-out`,
+`--cpu`, profiler) and known differences from the board: `host/README.md`.
+Useful log markers: `CurApName "Finder"` = boot-to-Finder frame, `SPEED`,
+`PROFILE`, `IDLE-FF:`, `diskov:`.
 
-Musashi requires a two-stage build. The generated files (`m68kops.c`, `m68kops.h`) are **gitignored** — they exist only in the working tree, and regeneration replaces them. `m68k_in.c` (tracked) carries `EXT_RAM_BSS_ATTR` on the two big tables so every regeneration places them in PSRAM; without it the link overflows `.dram0.bss` by ~434KB. `m68kmake` does not read `m68kconf.h` — generated ops are config-independent, so a conf flip alone needs no regeneration.
+## Architecture (short)
 
-To regenerate (requires a host C compiler like MinGW GCC):
-```bash
-cd MacintoshESPEmulator/components/musashi
-gcc -o m68kmake m68kmake.c
-./m68kmake . m68k_in.c
-```
+Details: `docs/architecture-overview.md`.
 
-## Coding Conventions
+- **Core 1**: `mac_emu_run()` — frame loop, 60.15 Hz, `MAC_CYCLES_PER_VBLANK`
+  ≈130,560 device cycles per frame, executed in slices; device ticks (VIA,
+  Egret, SWIM) between slices; frame-end touch/disk updates; idle fast-forward;
+  real-time throttle.
+- **Core 0**: `mac_video_task` (renderer, 20-line DMA strips, dirty-strip skip)
+  and the touch sampler task.
+- **Classic** (`MAC_ROM_LC_II=0`): 68000, map RAM/ROM $400000/SCSI/SCC/IWM/VIA,
+  ROM patched to a native 480×320 visible screen (`CLASSIC_NATIVE_LCD`), SWIM
+  ISM emulation + .Sony Device Manager intercepts serve the disk, RTC/PRAM chip
+  (`mac_rtc.c`), clicks via a C mirror of the ROM's PostEvent.
+- **V8 / LC II** (`MAC_ROM_LC_II=1`): 68030 with a PMMU instruction stub (no
+  translation), ROM at $A00000, devices at $F00000+ (VIA1, SCC, SCSI, ASC,
+  SWIM, VDAC $F24000, pseudo-VIA2 $F26000, VRAM $F40000), overlay clears on
+  the first access to $A00000. Egret/Cuda HLE (`mac_egret.c`: ADB mouse, RTC,
+  PRAM, 1 Hz tick), video (`mac_v8video.c`: VRAM in PSRAM, CLUT, ROM VPBlocks
+  patched to 480×320), disk via a .Sony Prime hook (`mac_v8disk.c`).
+- **Disk**: image embedded in flash (read-only) + PSRAM copy-on-write overlay
+  (`mac_disk_overlay.c`); lost at power-off.
+- **Native speed-ups** (`components/musashi/mac_native.c`): trap dispatcher,
+  dcmp 3 decompressor, ROM loop accelerator.
 
-- **C** for emulation code (`main/*.c`), **C++** only for `main.cpp` (ESP-IDF entry point) and display driver
-- All emulator headers use `extern "C"` guards for C++ compatibility
-- Third-party code (Musashi) is copied into the project, not referenced externally
-- Big-endian byte access via macros (`READ_BYTE`, `READ_WORD`, `READ_LONG`)
-- Memory allocation: large buffers go to PSRAM via `heap_caps_malloc(MALLOC_CAP_SPIRAM)`, DMA buffers stay in internal SRAM via `MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL`
-- Musashi large BSS tables (opcode jump table, cycle table) use `EXT_RAM_BSS_ATTR` to place them in PSRAM
+Classic boot workarounds (memory-test D6 force, SCSI polling bypass and
+boot-mode $00 reads, overlay one-shot latch, .Sony I/O intercepts and DM-spin
+rescue at $4031BE, ADB completion flag, StartUpScreen BNE→BRA, UNIMP handler,
+SCC RR0 Sync/Hunt, Mini vMac-style checksum/RAM-test skips) are still in
+`mac_emulator.c`/`mac_memory.c`. Their history is in
+`spec/performance-roadmap.md` and `docs/architecture-overview.md`; most are keyed to Classic ROM
+addresses and gated off on V8.
 
-## Hardware Target (verified via board diagnostic 2026-04-08)
+### CRITICAL notes that still apply
 
-- **Board**: WT32-SC01-3.4 (Wireless Tag)
-- **SoC**: ESP32-D0WD rev v1.0 (dual-core Xtensa LX6 @ 240MHz)
-- **Flash**: **4MB** (detected, despite "16MB" label on board), 80MHz **QIO** (verified 2026-10-20, +1.1% speed vs DIO)
-- **PSRAM**: 8MB physical, **~4MB usable** (ESP32 virtual address space limit), 80MHz quad SPI
-- **Display**: ST7796 480x320 SPI (MOSI=13, CLK=14, CS=15, DC=21, RST=22, BL=23) — verified working
-- **Touch**: FT5x06 capacitive I2C (SDA=18, SCL=19, addr=0x38) — verified detected on I2C scan
-- **Internal SRAM**: ~365KB free, ~302KB DMA-capable
-- **Serial port**: COM7 (CH340 USB-UART, driver must be installed manually)
+- **`fast_slice` ≤ 4000 cycles** (`mac_emulator.c`, divided by
+  `MAC_CYCLE_SCALE`). Larger slices make `via_tick()` miss short VIA T2
+  periods and crash deterministically (tested up to 40000).
+- **CrsrNew ($08CE) only on a position change**, and only once WMgrPort
+  ($09DE) is valid. Writing it every frame forces cursor redraws that crash the
+  resource decompressor during INIT/Finder loading. Initial tracking values
+  must equal the `mouse_x/mouse_y` defaults.
+- **Clicks must be posted to the event queue** (EvQHdr $014A). MBState alone
+  is not enough: GetNextEvent/WaitNextEvent/ModalDialog read the queue. Post
+  only while the 68k interrupt mask is 0.
+- **MBState is written as a whole byte** ($00 down / $80 up): the shutdown
+  screen's Restart loop waits for exactly $00.
+- **VIA IRB initial value $31** (PB3=0, button down during boot) is required
+  for the Classic boot.
+- **V8: the overlay is not cleared by VIA ORA writes**; the ORA latch is Classic-only.
+- **Mac RAM is 2 MB** (power of two, aliased via `ram_mask` on the Classic;
+  V8 reads $FF above `ram_size` so the ROM sizes RAM correctly).
 
-## Emulation Architecture
+## Touch input
 
-### Boot Sequence
+`main/mac_touch.c` (gestures, sampler) + `main/mac_emulator.c` (apply).
+Details: `docs/display-pipeline.md#touch-input`.
 
-The emulator applies several bypasses to get through the Mac Classic ROM boot:
+- Swipe (> 8 px) moves the cursor 1:1, no button; tap (< 300 ms, < 8 px)
+  clicks; a second touch within 400 ms of a tap is tap-then-drag; after 300 ms
+  a 3 px nudge also counts as a drag. Each button state is held ≥ 2 frames.
+- `TOUCH_SAMPLER_TASK=1` (ESP32): sampler task on core 0 at ~60 Hz, the loop
+  calls `touch_consume()` once per frame (spinlock-guarded). Host: inline polling.
+- Position: both machines write MTemp/RawMouse/Mouse ($0828/$082C/$0830,
+  Point = Y.hi Y.lo X.hi X.lo) and CrsrNew (if CrsrCouple), gated on
+  `mac_post_boot` + valid WMgrPort.
+- Button, **Classic**: `CLASSIC_MOUSE_POSTEVENT=1` mirrors the ROM's ADB mouse
+  handler ($403A54: RndSeed, MBTicks, MBState, PostEvent $403EE6) into the
+  System's own SysEvtBuf; plus MBState and VIA PB3 (`via_set_mouse_button()`).
+- Button, **LC II**: the emulated Egret ADB mouse carries the button (zero
+  deltas); movement after a button transition waits until the transition is in
+  an ADB packet.
+- **Game mode** (`TOUCH_GAME_MODE`): a windowless non-Finder app in front
+  (WindowList $09D6 = NULL, ~1 s score with hysteresis) or a hidden cursor →
+  clicks posted at the menu bar (v=1), so the Process Manager does not switch
+  the game out.
+- **Game full view** (`GAME_FULL_VIEW`, Classic native only): while game mode
+  holds (0.5 s in, 1 s out) and the game has drawn into the 512×342 margin
+  (columns 480-511 / rows 320-341, compared with a baseline taken outside
+  games), `mac_full_view` makes the renderer show the whole 512×342 scaled to
+  480×320; CrsrPin $0834 becomes 0,0,342,512 and finger deltas are scaled
+  ×512/480, ×342/320. Leaving restores CrsrPin and clamps the cursor.
+  `GAME_FULL_SCREENBITS`: apps in `full_screen_apps[]` (`mac_memory.c`,
+  CurApName prefix: a full-screen game, a full-screen game) get the stock 512×342
+  from ScrnSize/_ScrnBitMap, so a game that centres its field on screenBits is
+  not cut off.
 
-1. **Memory test bypass** — ROM tests at $401CF0, $401D80, $401D96 force D6=0
-2. **SCSI polling bypass** — Clear loop counters at $41A44A (unconditional — must remain active during INIT loading)
-2b. **SCSI boot_mode** — `mac_scsi.c` returns $00 for all reads during boot (prevents SCSI Manager heap allocation that crashes INIT loading). Enabled via `scsi_set_active(true)` at idle loop detection.
-3. **Overlay one-shot latch** — First ORA write clears ROM overlay permanently
-4. **I/O completion bypass** — Fulfills disk reads directly from embedded flash image
-5. **StartUpScreen patch** — BNE→BRA to skip missing DSAT resource
-6. **ADB polling bypass** — Writes $FF completion flag at $08446C every frame
-7. **VIA PB4+PB5 force high** — ADB bus idle bits in ORB reads
-8. **VIA SR interrupt emulation** — ADB shift register protocol (gated by `adb_active` flag)
-9. **SCC RR0 Sync/Hunt bit** — Bit 4 set for LocalTalk INIT compatibility
-10. **ROM patches** — Mini vMac approach: checksum skip ($1C68), RAM test skip ($0086, $011E)
-11. **UNIMP trap handler** — Returns SUBA.L A0,A0; MOVEQ #0,D0; RTS at $400768
-12. **Device Manager intercepts** — read16_dm_read/ctl/stat for .SONY disk I/O
-13. **SEC-RD drive bypass** — SR flag manipulation at $4357F4 for drive ≥ 4
-14. **DM-spin rescue** — Instruction-fetch intercept at $4031BE catches stuck .SONY _Read polling (ioResult=1). `read16_dm_spin_rescue()` in mac_memory.c force-completes I/O from embedded disk image. Without this, async _Read requests that miss the $40315C intercept spin forever at 53% real-time.
+## Build switches
 
-### Performance Optimizations
+`-D` defines (C headers) unless noted; default in brackets.
 
-1. **M68K_SEPARATE_READS** (`m68kconf.h`) — Instruction fetches use lean IRAM functions that skip all diagnostic intercepts. Data reads keep full intercept logic. This gave a **17% reduction** in execution cycles.
-2. **mac_post_boot flag** (`mac_memory.h`) — Set at F2000. Enables the lean fetch path. During boot, falls through to the full `m68k_read_memory_16` with all intercepts.
-3. **IRAM_ATTR** — 5 lean read functions placed in internal SRAM (728 bytes, 70KB headroom). Bypasses flash instruction cache for guaranteed fast access.
-4. **PC consolidation** — Single `m68k_get_reg(PC)` per slice shared by all post-execute checks (was 8 separate calls).
-5. **Cycle profiling** — `esp_cpu_get_cycle_count()` measures exec vs overhead. Logged with SPEED report every 300 frames. Shows 97% time in m68k_execute, 3% overhead.
-6. **Idle fast-forward** (`MAC_IDLE_FF`, default 1, `mac_emulator.h/.c`) — when the Mac only waits for an interrupt (Process Manager idle loop `_Trap $ABF7; MOVE.L A4,D0; BEQ` seen from the A-line hook in `m68ki_exception_1010` with no interrupt/frame end since the previous pass, or a `CMP.L ($016A).W,Dn; Bcc.S *-4` tick-wait at a slice end), the rest of the frame's cycles are not emulated: device time (VIA/Egret/VBL) advances in `fast_slice` chunks until an interrupt above the SR mask is pending. Ticks per frame are unchanged. Host: LC II Finder idle 20.8k → 3.4k instructions/frame, Classic 10.2k → 3.7k, window drag 21.7k → 1.3k. Logged as `IDLE-FF:` with SPEED.
-7. **Real-time throttle** (`MAC_FRAME_THROTTLE`, default 1 on ESP32, 0 on host) — at most one frame per 16.6 ms (vTaskDelay); needed once idle frames are cheap. SPEED therefore caps at ~100%.
-8. **V8 cycle scale** (`MAC_V8_CYCLE_SCALE`, default 2) — the LC II CPU gets `MAC_CYCLES_PER_VBLANK/2` Musashi cycles per frame; each CPU cycle advances device time (VIA E clock, Egret, VBL) by 2. Musashi's 68030 timings (~6.2 cyc/instr vs 12.8 on the 68000) otherwise gave the LC II twice the instructions per tick. SWIM byte timing stays in CPU cycles. Boot-to-Finder takes ~2x the frames (same instructions); TimeDBRA calibrates to half (630 vs 1192).
+| Switch | Where | Meaning |
+|---|---|---|
+| `CLASSIC_NATIVE_LCD` [1] | mac_emulator.h | Classic ROM patched to a 480×320 visible screen, 1:1 render; 0 = stock 512×342 scaled |
+| `V8_NATIVE_LCD` [1] | mac_v8video.h | LC II 512×384 VPBlocks patched to 480×320 |
+| `GAME_FULL_VIEW` [1] | mac_emulator.h | Classic: scaled 512×342 view for full-screen games (forced 0 on LC II or with `CLASSIC_NATIVE_LCD=0`) |
+| `GAME_FULL_SCREENBITS` [=`GAME_FULL_VIEW`] | mac_emulator.h | Listed games get stock 512×342 screenBits |
+| `CLASSIC_VIA_ECLOCK` [=`CLASSIC_NATIVE_LCD`] | mac_via.c | Classic VIA timers count at the E clock (CPU/10) |
+| `CLASSIC_VIA_INTERP` [1] | mac_via.c | Classic VIA timers interpolated mid-slice |
+| `CLASSIC_VIA_IRQ_NOW` [1] | mac_emulator.h | Classic: drive the level-1 IRQ line on every IFR/IER change |
+| `CLASSIC_RTC` [1] | mac_rtc.h | Classic RTC/PRAM chip emulation (0 = frozen clock, PRAM $FF) |
+| `CLASSIC_MOUSE_POSTEVENT` [1] | mac_emulator.c | ROM-faithful PostEvent mirror (0 = legacy EvQEl buffers at $C0/$D8) |
+| `TOUCH_GAME_MODE` [1] | mac_emulator.c | Game mode click routing |
+| `TOUCH_SAMPLER_TASK` [1 ESP32 / 0 host] | mac_touch.h | Touch sampled by a core-0 task |
+| `MAC_IDLE_FF` [1] | mac_emulator.h | Idle fast-forward (Process Manager idle loop, Ticks-wait loops) |
+| `MAC_FRAME_THROTTLE` [1 ESP32 / 0 host] | mac_emulator.h | At most one frame per 16.626 ms |
+| `MAC_V8_CYCLE_SCALE` [2] | mac_emulator.h | LC II: CPU gets 1/N cycles per frame, device time ×N (Classic always 1) |
+| `EGRET_ONE_SEC_TICKS` [1] | mac_egret.c | Egret/Cuda 1 Hz tick packets (Mac clock advances) |
+| `DISK_WRITABLE` [1] | mac_disk_overlay.h | PSRAM copy-on-write disk overlay, volume unlocked |
+| `DISK_OVERLAY_KB` [384 Classic / 256 LC II] | mac_disk_overlay.h | Overlay pool size |
+| `MAC_DIAG` [0] | mac_memory.h | Boot diagnostics/spin detectors on memory hot paths |
+| `MAC_VIDEO_DIRTY` [1] | mac_video.c | Skip unchanged 20-line strips |
+| `MAC_MEM_CALLBACK_IRAM` [1] | mac_memory.c | Musashi memory callbacks in IRAM |
+| `MUSASHI_HOT_IRAM` [ON] (CMake) | components/musashi/CMakeLists.txt | `m68k_execute` + 128 hottest handlers in IRAM (`hot_iram.lf`) |
+| `M68K_INLINE_RAM` [OFF] | m68kconf.h | Inline RAM data accesses (faster on x86, slower on ESP32 I-cache) |
+| `M68K_INLINE_FETCH` [OFF] | m68kconf.h | Inline instruction fetches (−8% cycles when OFF on ESP32) |
+| `M68K_OP_INDEX` [OFF] | m68kconf.h | 16-bit opcode index table (−3%, costs 128 KB PSRAM + 10 KB DRAM) |
+| `M68K_EMULATE_BUS_ERROR` [OFF] | m68kconf.h | Bus-error machinery (nothing raises one) |
+| `MAC_NATIVE_TRAPDISP` [1] | m68kconf.h | Native A-line trap dispatcher (byte-identical) |
+| `MAC_NATIVE_DCMP` [1] | m68kconf.h | Native 'dcmp' 3 decompressor (output-exact; `MAC_NATIVE_DCMP_CHECK` host check) |
+| `MAC_NATIVE_LOOPS` [1] | m68kconf.h | Native long ROM loops at slice start (byte-identical) |
 
-### CRITICAL: VIA Timer Slice Size
+Also fixed in `m68kconf.h`: `M68K_SEPARATE_READS` ON (lean instruction-fetch
+path), 020/030 emulation ON, `M68K_EMULATE_PMMU` OFF (stub in `m68kmmu.h`).
 
-`fast_slice` in `mac_emulator.c` **must stay ≤ 4000 cycles**. Tested exhaustively up to 40000 with and without timer arm tracking — crashes deterministically at F5251+ (PC enters SCSI range $2Exxxx). The VIA T2 timer often has periods of 100-2000 cycles; larger slices cause `via_tick()` to miss underflows. This is **unsolvable** without running via_tick inside Musashi's execution callback.
+## Resource budget (2026-10-21)
 
-### Memory Map (Mac Classic, normal mode)
+| Resource | Use |
+|---|---|
+| Flash app partition 0x3F0000 | Firmware ~0x3E18F0 with the 2880K custom disk (about 1.4 MB less with the 1.44 MB floppy). The disk can be ~2.89 MB at most. |
+| IRAM | ~77.5 KB used, ~53 KB free (hot Musashi handlers, memory callbacks, lean fetch) |
+| PSRAM (~4 MB addressable of 8 MB) | Mac RAM 2 MB; Musashi jump + cycle tables ~580 KB (`EXT_RAM_BSS_ATTR`); LC II VRAM 512 KB; disk overlay 384 KB (Classic) / 256 KB (LC II) + 2 bytes/block index; LC II declaration-ROM copy ~5 KB |
+| Internal DMA RAM | 480×20×2 = 19.2 KB line buffer |
 
-| Address Range | Device |
-|---------------|--------|
-| $000000-$1FFFFF | RAM (2MB, aliased via mask) |
-| $400000-$43FFFF | ROM (512KB) |
-| $580000-$5FFFFF | SCSI (NCR 5380 — full register emulation, no devices) |
-| $800000-$9FFFFF | SCC read |
-| $A00000-$BFFFFF | SCC write |
-| $C00000-$DFFFFF | IWM/SWIM |
-| $E00000-$EFFFFF | VIA + SWIM ISM (A12 bank split) |
+## Conventions
 
-### Touch Input (Trackpad-Style Mouse)
+- C for emulation (`main/*.c`), C++ only for `main.cpp` and the display driver;
+  headers have `extern "C"` guards.
+- Big-endian access via the byte macros; Mac Points are vertical-first.
+- Large buffers in PSRAM (`heap_caps_malloc(MALLOC_CAP_SPIRAM)`), DMA buffers in
+  internal RAM (`MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL`).
+- Third-party code (Musashi) is copied in; keep its licence header.
+- Every new behaviour change gets a switch with the old behaviour at 0 for board A/B.
+- `m68kdasm.c` is not compiled (saves DRAM); use `tools/dis68k.py` or the host trace.
 
-The FT5x06 capacitive touch panel acts as a relative trackpad with tap-to-click:
+## Hardware facts
 
-- **Swipe/drag** (>8px movement): moves cursor, NO button press
-- **Quick tap** (<300ms, <8px movement): registers a click (mouseDown + mouseUp)
-- **Tap-then-drag** (second touch within 400ms of tap): click-and-drag for menus/windows
-- **Lift finger**: stops cursor movement / ends drag
-
-Implementation (`mac_touch.c` gestures/sampler, `mac_emulator.c` apply):
-0. `TOUCH_SAMPLER_TASK` (default 1 on ESP32, 0 on host): a FreeRTOS task on core 0 (`touch_sampler_start()` from main.cpp) samples at ~60 Hz independent of emulation speed; the emulation loop calls `touch_consume()` once per frame (spinlock-guarded queue: movement + ordered button transitions, each button state held >= 2 frames). With 0, `touch_poll_inline()` samples from the loop every 16 ms.
-   Once a touch crosses 8 px the movement since touch-down is applied (no dead zone); after 300 ms a 3 px nudge also counts as a drag.
-   **LC II / V8**: cursor positioned absolutely like the Classic (`v8_apply_touch()`: MTemp/RawMouse/Mouse = Mouse + delta, CrsrNew if CrsrCouple) — 1:1, no acceleration. The emulated ADB mouse carries the button only (zero deltas); movement after a button transition waits until that transition is in an ADB packet.
-1. Polls FT5x06 at ~60Hz via `display_get_touch()` (I2C)
-2. Touch axes are swapped and horizontal inverted vs display orientation
-3. Gesture detection: tracks touch start time/position, classifies as tap or drag
-4. Cursor delta applied only during drags (not on first touch frame)
-5. Mouse button (2026-10-21 rework):
-   - **Classic (`CLASSIC_MOUSE_POSTEVENT=1`)**: a C mirror of the ROM's ADB mouse handler ($403A54): RndSeed, MBTicks, MBState $00/$80, then PostEvent ($403EE6) into the System's own SysEvtBuf (honours SysEvtMask; qType 4). Posts only when the 68k SR interrupt mask is 0, so they can never land inside an OS queue routine. The old fixed EvQEl buffers at $C0/$D8 are gone (=0 restores them, de-duplicated).
-   - **LC II**: the emulated ADB mouse (Egret) carries the button; the ROM's handler posts the event.
-   - **Game mode (`TOUCH_GAME_MODE=1`)**: when the front app has no windows (WindowList $09D6 == NULL and CurApName != Finder for ~1 s), clicks are still posted but at the menu bar (v=1), so the Process Manager does not switch a full-screen game (e.g. a full-screen game) out to the Finder.
-   - **MBState ($0172)** written as a whole byte ($00 down / $80 up) every frame — the shutdown screen's Restart loop waits for exactly $00.
-   - **VIA PB3** (`via_set_mouse_button()`) — hardware button, active low. VIA IRB initialized to $31 (PB3=0, button down during boot — required for boot to work).
-6. Per-frame writes cursor position to Mac low-memory globals (gated by `mac_post_boot` + WMgrPort valid, **only when position changes**):
-   - MTemp ($0828), RawMouse ($082C), Mouse ($0830) — big-endian Mac Point (Y.hi Y.lo X.hi X.lo)
-   - CrsrNew ($08CE) = $FF — triggers cursor redraw (**only written when position changes**)
-   - CrsrCouple ($08CF) = $FF — keeps cursor coupled to mouse
-
-**CRITICAL**: CrsrNew must NOT be written unconditionally every frame — it forces cursor redraws that crash the resource decompressor (DCMP) during INIT/Finder loading. Only set CrsrNew when mouse position actually changes. Initial tracking values must match `mouse_x`/`mouse_y` defaults to prevent a false change on first WMgrPort-valid frame.
-
-**CRITICAL**: On ADB Macs (like Mac Classic), the event system does NOT poll MBState for click detection. Mouse events must be POSTED to the event queue at $014A (now via the PostEvent mirror above). Setting MBState alone is insufficient — applications using WaitNextEvent/GetNextEvent/ModalDialog never see clicks without queue-posted events.
-
-## Key Design Decisions
-
-1. **Native esp_lcd driver** instead of `esp32_display_panel` managed component (incompatible with ESP-IDF v6.0)
-2. **No disassembler** compiled in (`m68kdasm.c` excluded) to save 256KB DRAM
-3. **PSRAM for Musashi tables** via `EXT_RAM_BSS_ATTR` — the 580KB opcode/cycle tables don't fit in 180KB DRAM
-4. **Chunked video rendering** — 20-line strips to limit DMA buffer size
-5. **Warning suppression** for Musashi (GCC 15.2.0 is stricter) — see `components/musashi/CMakeLists.txt`
-6. **Disk image in flash** — embedded in flash (.rodata), read-only. Saves PSRAM for RAM.
-7. **2MB Mac RAM** (power-of-2) — required for correct ROM sizing via hardware-style aliasing. Addresses beyond 2MB wrap via `ram_mask = 0x1FFFFF`. 2MB is a valid Mac Classic config (1MB base + 1MB SIMM).
-8. **M68K_SEPARATE_READS** — Splits instruction fetches from data reads in Musashi for lean hot path. Lean functions go in IRAM; data reads keep all diagnostic intercepts.
-
-## PSRAM Budget (~4MB usable)
-
-| Allocation | Size | Source |
-|------------|------|--------|
-| Musashi opcode tables | 580KB | EXT_RAM_BSS (static) |
-| Mac RAM | 2MB | heap_caps_malloc at boot |
-| **Total** | **~2.6MB** | |
-| Headroom | ~1.4MB | |
-
-## Future Work
-
-- **Further performance**: 97% of time is in m68k_execute(). Gains require optimizing the Musashi core (computed-goto dispatch, hot handlers in IRAM, a smaller jump table) and reducing PSRAM/flash cache pressure. A 68030 ROM is **not** a speed lever: speed is host instructions per second, and no ROM beats Classic.ROM (68000, 1-bit). fast_slice increase is confirmed impossible. PSRAM workaround `DUPLDST` was measured 1.3% slower than `MEMW` (keep MEMW; the chip is rev v1.0, so the workaround cannot be disabled).
-- **68030 / colour (V8) track**: CPU `M68K_CPU_TYPE_68030` (Color Classic and LC II are both 68030). V8 device map from the ROM's decoder table: VIA1 $F00000, SWIM $F16000, SCC $F04000, SCSI $F10000, ASC $F14000, VDAC $F24000, pseudo-VIA2 $F26000, VRAM $F40000. The overlay clears on the first access to ROM at $A00000, not on a VIA ORA write. Remaining: Egret HLE, then video (VRAM, monitor sense, CLUT, depth-aware renderer). **Final ROM: LC-II.ROM** (saves 512KB of flash vs Color Classic).
-- SCC serial emulation (currently stub)
-- ~~Touch-screen mouse~~ — **DONE**: trackpad-style relative input with tap-to-click and tap-then-drag
-- ~~Mouse clicks~~ — **DONE**: event queue posting to EvQHdr $014A
-- Keyboard input via touch-screen virtual keyboard
-- **Virtual SCSI hard drive** in PSRAM or flash partition for OS installation. NCR 5380 register emulation already works (arbitration, selection timeout, bus status). Need to add a SCSI target device that responds to selection and handles INQUIRY/READ/WRITE commands. Flash budget: ~1.44MB free (app partition 3.94MB, current binary 2.48MB).
-- Strip diagnostic logging for production builds (would reduce flash code size but minimal speed impact since 97% is in Musashi)
+WT32-SC01 v3.4: ESP32-D0WD rev 1.0 at 240 MHz; flash **4 MB** (label says 16 MB),
+80 MHz **QIO**; PSRAM 8 MB at 80 MHz, ~4 MB usable; ST7796S on SPI2 at 40 MHz
+(MOSI 13, CLK 14, CS 15, DC 21, RST 22, BL 23), BGR element order; FT5x06 on
+I2C (SDA 18, SCL 19, 0x38). PSRAM cache workaround: MEMW (DUPLDST measured
+1.3% slower). Details: `docs/hardware.md`.

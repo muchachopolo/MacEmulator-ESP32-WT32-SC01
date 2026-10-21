@@ -187,9 +187,9 @@ measurement, and verify every replacement byte-for-byte on the host harness.
 
 ## Step 5 — Publish for other fans (repo is public)
 
-Repo state found 2026-10-21: no top-level README.md and no LICENSE; vendor datasheet PDFs are
+Repo state found 2026-10-21: no top-level README.md and no LICENSE; vendor datasheet PDFs were
 committed (ST7796s.pdf, esp32-wrover-b_datasheet_en.pdf, WT32-SC01 datasheet, Getting Started
-guide); `origin/main` is at fbb47f5, so none of the recent work is on main; `ROM/` is correctly
+guide; since removed, links in `docs/hardware.md`); `origin/main` is at fbb47f5, so none of the recent work is on main; `ROM/` is correctly
 gitignored.
 
 Prepare the repo:
@@ -201,9 +201,9 @@ Prepare the repo:
 - [ ] ROM notice: users must supply their own `Classic.ROM` or `LC-II.ROM` and a System 7.5.3
       boot disk, and the README says where they go. **Never publish prebuilt firmware**
       (it embeds the Apple ROM and the disk image); releases are source-only.
-- [ ] Licence: MIT suggested (user to confirm). Keep Musashi's licence notice; credit Musashi,
+- [x] Licence: MIT (2026-10-21): `LICENSE`, `THIRD_PARTY_NOTICES.md`. Keep Musashi's licence notice; credit Musashi,
       MAME (V8/Egret references) and Mini vMac (screen-hack precedent).
-- [ ] Replace the committed datasheet PDFs with links to the vendors' pages.
+- [x] Replace the committed datasheet PDFs with links to the vendors' pages (PDFs removed; links in `docs/hardware.md`).
 - [ ] GitHub topics: esp32, macintosh, 68k, emulator, wt32-sc01, classic-mac, system7.
 - [ ] Remove or neutralise `CLAUDE.md`'s machine-specific paths if they would confuse users
       (or keep it as contributor notes).

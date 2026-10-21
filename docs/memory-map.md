@@ -1,99 +1,96 @@
-# Macintosh 68000 Memory Map
+# Memory maps
 
-The Macintosh Classic uses a 24-bit address bus (16MB address space). All peripherals are memory-mapped.
+Both machines use a 24-bit bus (`address &= 0x00FFFFFF`; the LC II runs the
+ROM in 24-bit mode, and its 32-bit device bases $50Fxxxxx reduce to
+$Fxxxxx). Decoding is in `main/mac_memory.c` (`mem_read_byte` /
+`mem_write_byte`, plus fast paths for RAM, ROM and VRAM). Unmapped addresses
+read $FF; writes to ROM are ignored. Word and long accesses are big-endian.
+Peripheral details: [peripherals](peripherals.md).
 
-## Address Decode (mac_memory.c)
+## Mac Classic (`MAC_ROM_LC_II=0`)
 
-### Normal Mode (overlay = 0)
+### Normal mode (overlay off)
 
-After the ROM startup code clears the overlay bit in the VIA, the memory map is:
+| Range | Device | Notes |
+|---|---|---|
+| $000000–$3FFFFF | RAM (2 MB) | Aliased via `ram_mask` = $1FFFFF, like real hardware, so the ROM sizes 2 MB |
+| $400000–$4FFFFF | ROM (512 KB) | Aliased via `rom_mask`; patched on read (see below) |
+| $580000–$5FFFFF | SCSI NCR 5380 | Register = A6–A4; empty bus |
+| $800000–$9FFFFF | SCC read | A1 = channel, A2 = data/control |
+| $A00000–$BFFFFF | SCC write | Reads return $FF |
+| $C00000–$DFFFFF | IWM/SWIM | Odd bytes; A1–A4 select the line/register |
+| $E00000–$EFFFFF | VIA (registers at $EFE1FE + n×$200) | A12 = 1 **and** PC in the SWIM driver ($434000–$436000) routes to the SWIM ISM instead |
 
-```
-0x000000 ┌──────────────────────┐
-         │ RAM (2MB physical)   │  Mirrored in 4MB address window
-         │ ram[address & mask]  │  Writable
-0x400000 ├──────────────────────┤
-         │ ROM (512KB)          │  Mirrored to fill 1MB
-         │ rom[address & mask]  │  Read-only
-0x500000 ├──────────────────────┤
-         │ (unused)             │  Returns 0xFF
-0x600000 ├──────────────────────┤
-         │ (unused)             │
-0x800000 ├──────────────────────┤
-         │ SCC Read             │  Odd bytes only, even → 0xFF
-         │ Zilog 8530           │  Bit 1: channel, Bit 2: data/ctrl
-0xA00000 ├──────────────────────┤
-         │ SCC Write            │  Odd bytes only
-0xC00000 ├──────────────────────┤
-         │ IWM/SWIM             │  Odd bytes only
-         │ Floppy controller    │  A1-A4 select register/line
-0xE00000 ├──────────────────────┤
-         │ VIA 6522             │  Odd bytes only
-         │                      │  Register N at base + N*0x200
-0xF00000 ├──────────────────────┤
-         │ (unused)             │
-0xFFFFFF └──────────────────────┘
-```
+### Overlay mode (after reset)
 
-### Overlay Mode (overlay = 1, after reset)
+ROM is mirrored at $000000 so the 68000 can fetch its reset vectors; RAM is
+reachable at $600000–$7FFFFF. The first VIA ORA write clears the overlay for
+good (one-shot latch). If the overlay is turned on again later, vectors
+$000–$3FF still come from RAM.
 
-On reset, the VIA overlay bit is set. This remaps ROM to address 0 so the 68000 can read its reset vector (which must be at 0x000000):
+### ROM patches
 
-```
-0x000000 ┌──────────────────────┐
-         │ ROM (mapped here)    │  Reset vectors at 0x000000
-0x400000 ├──────────────────────┤
-         │ ROM (normal loc)     │
-0x500000 ├──────────────────────┤
-         │ (unused)             │
-0x600000 ├──────────────────────┤
-         │ RAM (alternate)      │  RAM accessible here during overlay
-0x700000 ├──────────────────────┤
-         │ ...peripherals same  │
-```
+Applied in the ROM read paths (the flash image is never modified): checksum
+and RAM-test skips (Mini vMac approach), the StartUpScreen BNE→BRA, and the
+native 480×320 immediates ([display-pipeline](display-pipeline.md)).
 
-The ROM startup code writes to VIA Port A bit 4 to clear overlay, which switches RAM back to address 0.
+### RAM layout (2 MB)
 
-## Special RAM Addresses
+| Address | Contents |
+|---|---|
+| $000–$3FF | Exception vectors |
+| $100–$FFF | Low-memory globals (overlapping the trap tables below) |
+| $400–$7FF | OS trap table |
+| $E00–$15FF | Toolbox trap table (System 7 extends it through the table at ($0664)) |
+| $1600+ | System heap, then application heap |
+| MemTop − $5900 = $1FA700 | Screen buffer, 512×342×1 bit (21,888 bytes, rowBytes 64; native mode shows 480×320 of it) |
+| MemTop − $300 = $1FFD00 | Sound buffer |
 
-The Mac stores special data structures at fixed offsets relative to the top of RAM. With 2MB physical RAM (`MAC_RAM_SIZE = 0x200000`):
+## V8: LC II / Color Classic (`MAC_ROM_LC_II=1`)
 
-| Address (2MB) | Offset from top | Content |
-|---------------|-----------------|---------|
-| 0x1FA700 | RAM_SIZE - 0x5900 | Screen buffer start (21,888 bytes) |
-| 0x1FFD00 | RAM_SIZE - 0x0300 | Sound buffer (768 bytes) |
+From the ROM's own decoder table (Color-Classic.ROM file $3490; LC-II.ROM
+uses the same constants).
 
-The screen buffer is 512 * 342 / 8 = 21,888 bytes of 1-bit pixel data. Each scanline is 64 bytes (512 pixels / 8). Bit 7 is the leftmost pixel. 1 = black, 0 = white.
+| Range | Device | Emulated |
+|---|---|---|
+| $000000–$9FFFFF | RAM (2 MB populated; above `ram_size` reads $FF, no aliasing) | yes |
+| $A00000–$AFFFFF | ROM ($40A00000) | yes; the declaration-ROM area is served from the patched 480×320 copy |
+| $F00000–$F01FFF | VIA1 (registers every $200) | yes |
+| $F04000–$F05FFF | SCC | stub |
+| $F10000–$F13FFF | SCSI NCR 5380 (+ $F12000 pseudo-DMA) | empty bus |
+| $F14000 | ASC (sound) | no (reads $FF) |
+| $F16000–$F17FFF | SWIM | yes |
+| $F24000 | VDAC (CLUT) | yes |
+| $F26000 | pseudo-VIA2 (slot VBL, monitor sense, depth) | yes |
+| $F40000–$FBFFFF | VRAM, 512 KB (in PSRAM) | yes, with 8/16/32-bit fast paths |
+| $FC0000 | Diagnostic-ROM probe | reads $FF |
+| $FE0000–$FE0FFF | Emulator-only: .Sony Prime stub ([peripherals](peripherals.md#v8-floppy)) | yes |
 
-## Implementation Notes
+**Overlay:** after reset the ROM is mirrored at $000000–$07FFFF only (RAM
+never moves to $600000). The overlay clears on the first access to
+$A00000–$AFFFFF (the LC II ROM jumps there at $A02E3E), as in MAME; VIA ORA
+writes do not clear it on V8.
 
-- All address decoding masks to 24 bits: `address &= 0x00FFFFFF`
-- RAM and ROM use bitmask mirroring: `address & (size - 1)` (requires power-of-2 sizes)
-- Peripheral registers respond only on odd byte addresses (the 68000 data bus routing)
-- Word and long reads are constructed from consecutive byte reads (big-endian)
-- Writes to ROM space are silently ignored
-- Unmapped addresses return 0xFF (open bus)
+**Machine identity:** VIA1 port A ID bits: Color Classic $0B, LC II $5D.
 
-## V8 Family Map (Color Classic / LC II, `MAC_ROM_LC_II=1`)
+## Key low-memory globals
 
-From the ROM's own decoder table (Color-Classic.ROM file $3490; LC-II.ROM holds the same
-constants). The 32-bit bases are $50Fxxxxx; the 24-bit bus drops the top byte.
+The emulator reads and writes these directly. A Point is 4 bytes, vertical
+first: Y.hi Y.lo X.hi X.lo.
 
-| Address | Device | Emulated |
-|---------|--------|----------|
-| $000000-$9FFFFF | RAM (2MB physical, aliased via mask) | yes |
-| $A00000-$AFFFFF | ROM ($40A00000) | yes |
-| $F00000-$F01FFF | VIA1 (registers every $200) | yes |
-| $F04000 | SCC | no |
-| $F06000 / $F10000 / $F12000 | SCSI DRQ / SCSI / SCSI handshake | no |
-| $F14000 | ASC (sound) | no |
-| $F16000-$F17FFF | SWIM | yes |
-| $F24000 | VDAC (CLUT) | TODO |
-| $F26000 | pseudo-VIA2 / RBV (video enable, monitor sense) | TODO |
-| $F40000-$FBFFFF | VRAM | TODO |
-| $FC0000 | diagnostic-ROM probe (nothing there) | reads $FF |
-
-Overlay: after reset the ROM is mirrored at $0-$7FFFF. It switches off on the first access
-to $A00000-$AFFFFF (the ROM jumps there at $A02E3E). VIA ORA writes do NOT clear it on V8.
-The Egret microcontroller (ADB, RTC, PRAM) talks through the VIA1 shift register with
-PB3/PB4/PB5 handshake lines.
+| Address | Name | Use in the emulator |
+|---|---|---|
+| $0108 | MemTop | Screen base on the Classic |
+| $014A | EvQHdr | Event queue (click posting); qHead $014C, qTail $0150 |
+| $016A | Ticks | Tick-wait detection (idle fast-forward), event times |
+| $0172 | MBState | Button: $00 down, $80 up (whole byte) |
+| $020C | Time | Mac clock (host prints it every 3000 frames) |
+| $0226 | JPrime | V8 .Sony Prime hook |
+| $0824 | ScrnBase | Classic framebuffer; $50F40000 on V8 |
+| $0828 / $082C / $0830 | MTemp / RawMouse / Mouse | Cursor position (touch) |
+| $0834 | CrsrPin | Cursor bounds (480×320 native; widened in game full view) |
+| $08CE / $08CF | CrsrNew / CrsrCouple | Cursor redraw / coupling |
+| $08FC | JIODone | I/O completion (V8 disk stub) |
+| $0910 | CurApName | Current app (game mode, Finder detection) |
+| $09D6 | WindowList | Game mode (no windows) |
+| $09DE | WMgrPort | Window Manager ready gate for cursor writes |

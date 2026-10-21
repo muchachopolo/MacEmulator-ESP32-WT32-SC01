@@ -1,97 +1,80 @@
-# Hardware: WT32-SC01-3.4
+# Hardware: WT32-SC01 v3.4
 
-## Board Overview
+The WT32-SC01 v3.4 by Wireless Tag is an ESP32-WROVER-B board with a 3.5"
+480×320 SPI LCD and a capacitive touch panel. The emulator needs nothing
+else. Other WT32-SC01 variants (for example the ESP32-S3 "Plus" with a
+parallel LCD) are **not** supported.
 
-The WT32-SC01-3.4 is a development board by Wireless Tag featuring an ESP32-WROVER-B module with an integrated 3.5" LCD and capacitive touch panel.
+## Datasheets
 
-**Datasheets** (in project root):
-- `Getting+Started+Guide+for+WT32-SC01.pdf` — Board pinout and setup
-- `WT32-SC01+DataSheetV3.4++with+16MB.pdf` — Full board datasheet
-- `ST7796s.pdf` — LCD controller datasheet
-- `esp32-wrover-b_datasheet_en.pdf` — ESP32-WROVER-B module datasheet
+The vendor PDFs are not stored in this repository; get them from the vendors:
 
-## Actual Board Specifications (verified 2026-04-08)
+| Document | Vendor | Link |
+|---|---|---|
+| WT32-SC01 datasheet v3.4, *Getting Started Guide for WT32-SC01* | Wireless Tag | from Wireless Tag or your board seller |
+| ESP32-WROVER-B datasheet | Espressif | [esp32-wrover-b_datasheet_en.pdf](https://www.espressif.com/sites/default/files/documentation/esp32-wrover-b_datasheet_en.pdf) |
+| ESP32 Technical Reference Manual | Espressif | [esp32_technical_reference_manual_en.pdf](https://www.espressif.com/sites/default/files/documentation/esp32_technical_reference_manual_en.pdf) |
+| ESP-IDF Programming Guide (ESP32) | Espressif | [docs.espressif.com](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/) |
+| ST7796S LCD controller datasheet | Sitronix | Sitronix (search "ST7796S datasheet") |
+| FT5x06 capacitive touch controller datasheet / application note | FocalTech | FocalTech (search "FT5x06 datasheet") |
 
-Board diagnostic flashed and probed over serial. Key finding: **flash is 4MB, not 16MB** as the datasheet/label claims.
+## Measured specifications (board diagnostic, `board_test/`, 2026-04-08)
 
-| Feature | Datasheet | Actual (measured) |
-|---------|-----------|-------------------|
-| Chip | ESP32-WROVER-B | **ESP32-D0WD** rev v1.0 |
-| CPU | Dual-core Xtensa LX6 @ 240MHz | Confirmed |
-| Internal SRAM | 520KB | ~365KB free at boot |
-| Flash | 16MB (quad SPI) | **4MB** (chip ID 0x5E4016) |
-| PSRAM | 8MB (quad SPI @ 80MHz) | 8MB detected, **~4MB usable** (address space limit) |
-| WiFi | 802.11 b/g/n | Confirmed |
-| Bluetooth | 4.2 BR/EDR + BLE | Confirmed |
-| USB-UART | — | CH340 (driver install required) |
+| Feature | Datasheet | Measured |
+|---|---|---|
+| Chip | ESP32-WROVER-B | ESP32-D0WD rev v1.0 |
+| CPU | Dual-core Xtensa LX6, 240 MHz | confirmed |
+| Flash | 16 MB | **4 MB** (JEDEC ID 0x5E4016) |
+| PSRAM | 8 MB quad SPI, 80 MHz | 8 MB, **~4 MB addressable** |
+| Internal SRAM | 520 KB | ~365 KB free at boot, ~302 KB DMA-capable |
+| USB-UART | — | CH340 (install its driver; the port was COM3 on the dev PC) |
 
-### PSRAM Virtual Address Limitation
+**Flash:** the label and datasheet say 16 MB, but esptool and the runtime both
+detect 4 MB. The firmware (code + ROM + disk) must fit the 0x3F0000 app
+partition. Flash runs at 80 MHz QIO (+1.1% emulation speed vs DIO).
 
-The ESP32 can only map 4MB of PSRAM into its virtual address space at a time (0x3F800000–0x3FC00000). The remaining 4MB is accessible only via bank switching (`CONFIG_SPIRAM_BANKSWITCH_ENABLE`), which is enabled but not practical for heap allocation. Effective usable PSRAM for our application is ~4MB.
+**PSRAM:** the ESP32 maps only 4 MB of PSRAM into its address space
+(0x3F800000–0x3FC00000); the rest would need bank switching, which is not
+used. PSRAM is several times slower than internal RAM and is accessed through
+a 32 KB cache shared with flash, which is why hot code goes to IRAM.
+The chip is rev 1.0, so the PSRAM cache workaround cannot be disabled; MEMW is
+used (DUPLDST measured 1.3% slower).
 
-### Flash Size Discrepancy
+## Display: ST7796S
 
-The board label and datasheet claim 16MB flash, but esptool and the runtime both detect 4MB. The JEDEC ID `0x5E4016` confirms a 4MB device. This may be a different board revision or batch. The emulator firmware (2.4MB with ROM+disk) fits comfortably in 4MB.
+| Signal | GPIO |
+|---|---|
+| MOSI | 13 |
+| SCLK | 14 |
+| CS | 15 |
+| DC | 21 |
+| RST | 22 |
+| Backlight | 23 |
+| MISO | not connected |
 
-## Display: ST7796 (480x320)
+- SPI2_HOST at 40 MHz, DMA (auto channel), 10-deep transaction queue.
+- RGB565, BGR element order; landscape via swap-XY and mirror X/Y.
+- Driven with `esp_lcd_new_panel_st7789()` (compatible command set). The native
+  esp_lcd driver replaced the `esp32_display_panel` component, which does not
+  support ESP-IDF v6.
+- `display_draw()` blocks on a semaphore given by the SPI done callback, so the
+  caller's buffer is free when it returns.
 
-The ST7796 is a 480x320 RGB565 TFT LCD controller connected via SPI.
+## Touch: FT5x06
 
-| Signal | GPIO | Notes |
-|--------|------|-------|
-| MOSI | 13 | SPI data out |
-| SCLK | 14 | SPI clock |
-| CS | 15 | Chip select (active low) |
-| DC | 21 | Data/Command select |
-| RST | 22 | Reset (active low) |
-| BL | 23 | Backlight (GPIO on/off) |
-| MISO | NC | Not connected (write-only) |
+| Signal | GPIO |
+|---|---|
+| SDA | 18 |
+| SCL | 19 |
 
-- **SPI host**: SPI2_HOST
-- **SPI clock**: 40MHz
-- **Color format**: RGB565 (16-bit), BGR element order
-- **Orientation**: Landscape (swap XY, mirror Y)
-- **DMA**: SPI DMA with auto channel, 10-deep transfer queue
-- **Panel driver**: `esp_lcd_new_panel_st7789()` (ST7796 is register-compatible with ST7789)
+- I2C_NUM_0, 400 kHz, address 0x38.
+- `display_get_touch()` reads 7 bytes from register 0x00: 0x02 = number of
+  points (low nibble), 0x03/0x04 = X (12 bits), 0x05/0x06 = Y (12 bits).
+- The emulator swaps the axes and inverts the horizontal axis to match the
+  landscape display. Gesture handling: [display-pipeline](display-pipeline.md#touch-input).
 
-### DMA Synchronization
+## Expansion
 
-The display driver uses a FreeRTOS binary semaphore for DMA synchronization:
-1. `display_draw()` starts a DMA transfer via `esp_lcd_panel_draw_bitmap()`
-2. The SPI ISR calls `on_color_trans_done()` which gives the semaphore
-3. `display_draw()` blocks on `xSemaphoreTake()` until DMA completes
-
-This ensures the caller's buffer isn't modified while DMA is in progress.
-
-## Touch: FT5x06 (Capacitive)
-
-The FT5x06 is a capacitive touch controller connected via I2C.
-
-| Signal | GPIO | Notes |
-|--------|------|-------|
-| SDA | 18 | I2C data |
-| SCL | 19 | I2C clock |
-
-- **I2C address**: 0x38
-- **I2C speed**: 400kHz (Fast mode)
-- **I2C port**: I2C_NUM_0
-
-### Touch Register Layout
-
-| Register | Content |
-|----------|---------|
-| 0x02 | Number of touch points (low nibble) |
-| 0x03 | Touch X high (bits 11:8 in low nibble) |
-| 0x04 | Touch X low (bits 7:0) |
-| 0x05 | Touch Y high (bits 11:8 in low nibble) |
-| 0x06 | Touch Y low (bits 7:0) |
-
-Touch coordinates are read as a 7-byte block starting at register 0x00. The coordinates may need swapping for landscape orientation.
-
-## PSRAM Considerations
-
-The ESP32-WROVER-B uses VSPI for PSRAM access. Since the display uses SPI2_HOST (HSPI), there is no bus conflict.
-
-PSRAM is configured at 80MHz quad SPI with bank switching (8 virtual banks). Large allocations use `heap_caps_malloc(size, MALLOC_CAP_SPIRAM)`. Static BSS can be placed in PSRAM using `EXT_RAM_BSS_ATTR` (requires `CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y`).
-
-**Important**: PSRAM is slower than internal SRAM (~2-4x latency). Performance-critical data (DMA buffers, ISR data) should stay in internal SRAM.
+The board's expansion header is unused today. Planned: an external SPI/I2C
+keyboard and a joystick (see [`spec/next-steps-plan.md`](../spec/next-steps-plan.md)).
+The emulator has no audio output yet.

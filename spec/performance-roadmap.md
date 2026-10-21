@@ -1,5 +1,7 @@
 # Performance roadmap — Macintosh ESP32 emulator
 
+> **Historical record.** This file keeps the history and measurements; the current plan lives in [`next-steps-plan.md`](next-steps-plan.md).
+
 Spec written 2026-10-16. Purpose: durable plan so a future session can resume without
 re-deriving context. Update the Status line and tick boxes as work lands.
 

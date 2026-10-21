@@ -20,10 +20,12 @@ in about a second instead of a flash cycle. Nothing in `main/` or
 
 `DISK_NAME=file.dsk` (default `OS_750_boot.dsk`) selects the disk image in the ROM directory, like `DISK_NAME` in `main/CMakeLists.txt`; use a separate `BUILD=` dir per image (objects do not track make variables).
 
-The compile definitions match `main/CMakeLists.txt`: `MAC_ROM_LC_II=1`
-(Color-Classic.ROM) and `HAS_DISK_IMAGE=1`. The build also adds
-`HOST_BUILD=1`, which the core does not use yet. To build the Classic ROM
-instead, use `make MAC_ROM_LC_II=0`.
+The compile definitions mirror `main/CMakeLists.txt`: by default
+`MAC_ROM_LC_II=1`, `MAC_V8_CUDA=0` (LC-II.ROM) and `HAS_DISK_IMAGE=1` when the
+disk file exists. `make MAC_ROM_LC_II=0` builds the Classic (Classic.ROM),
+`make MAC_V8_CUDA=1` the Color Classic (Color-Classic.ROM). The build also adds
+`HOST_BUILD=1`, which selects host defaults (inline touch sampling, no frame
+throttle, no RGB565 byte swap).
 
 ## Frame pacing
 
