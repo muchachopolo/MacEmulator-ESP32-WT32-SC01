@@ -2,7 +2,7 @@
 
 Written 2026-10-21. Goal: run the same emulator core (Mac Classic and LC II)
 on a **Raspberry Pi without an operating system**, booting straight from the
-SD card, with a 3.5-inch SPI touch shield. Status: R0, R1 (display) and R2 (touch) done (2026-10-21); next R3.
+SD card, with a 3.5-inch SPI touch shield. Status: R0–R3 done (2026-10-21): the Mac Classic boots to the Finder on the Pi 2 with touch; next R4/R5.
 
 **User's hardware (2026-10-21):**
 - **Raspberry Pi 2 Model B v1.1 (2014)** — BCM2836, **4× ARM Cortex-A7 @ 900 MHz**
@@ -133,10 +133,15 @@ Higher SPI clocks are often possible on these shields — measure.
       calibration (axis swap + linear), then drawing with raw X/Y/Z shown.
       **Result:** works; swap 1, raw left 3619 / right 472 / top 730 / bottom
       3443 at the 40-px-inset targets → `XPT2046_CAL_*` defaults.
-- [ ] **R3. Emulator core boots**: `ports/rpi1/` Makefile building `main/*.c`
+- [x] **R3. Emulator core boots**: `ports/rpi1/` Makefile building `main/*.c`
       + Musashi with the shims; ROM and disk loaded from SD; render to the LCD;
       Classic boots to the Finder (compare screenshots/behaviour with the host
-      harness).
+      harness). **Done (2026-10-21, `ports/rpi/r3-emu/`):** single core, core
+      compiled with `HOST_BUILD=1` + `MAC_FRAME_THROTTLE=1`, newlib libc + stubs,
+      ROM and disk embedded in `kernel7.img` (Circle `KERNEL_MAX_SIZE=16 MB`).
+      Boots to the Finder; touch moves the cursor and clicks once the desktop is
+      up (touch is ignored until WMgrPort is valid, as on the ESP32). Boot time
+      not yet measured.
 - [ ] **R4. Input**: touch → `mac_touch.c` (trackpad + absolute modes);
       USB mouse; USB keyboard → ADB keyboard (shares plan step 6b).
 - [ ] **R5. Storage**: writable disk images on SD (write-back, flush at Shut
