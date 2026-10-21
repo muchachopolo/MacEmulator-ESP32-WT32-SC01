@@ -6,9 +6,12 @@
 static const char From[] = "r1";
 
 // BCM2835/6 SPI0 clock = 250 MHz core / even divider.
-// R1 result: 15.6 clean, 31.2 and above corrupt (74HC4094 chain) -> try between.
-static const unsigned Clocks[] = { 15625000, 17857142, 20833333, 25000000, 31250000 };
-static const char *const ClockText[] = { "15.6", "17.9", "20.8", "25.0", "31.2" };
+// R1b result: 17.9 MHz clean, 20.8 and above corrupt. Fills kept their colours
+// but landed in the wrong places: the short command/parameter transfers break,
+// the pixel stream doesn't. R1c: commands always at CmdClock, pixels at Clocks[i].
+static const unsigned CmdClock = 15625000;
+static const unsigned Clocks[] = { 17857142, 20833333, 25000000, 31250000, 41666666, 62500000 };
+static const char *const ClockText[] = { "17.9", "20.8", "25.0", "31.2", "41.7", "62.5" };
 static const unsigned NumClocks = sizeof Clocks / sizeof Clocks[0];
 
 #define RGB565(r, g, b)	((u16) ((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3)))
@@ -34,7 +37,7 @@ CKernel::CKernel (void)
 :	m_Screen (m_Options.GetWidth (), m_Options.GetHeight ()),
 	m_Timer (&m_Interrupt),
 	m_Logger (m_Options.GetLogLevel (), &m_Timer),
-	m_SPI (Clocks[0], 0, 0),
+	m_SPI (CmdClock, 0, 0),
 	m_LCD (&m_SPI)
 {
 	m_ActLED.Blink (3);
@@ -86,6 +89,19 @@ void CKernel::DrawTestPattern (unsigned nClockIndex)
 	{
 		m_LCD.Fill (i * W / 8, 0, W / 8, H * 2 / 3, Bars[i]);
 	}
+	static u16 Ramp[CILI9486::Width * 24];				// pixel-integrity check:
+	for (unsigned y = 0; y < 24; y++)				//  smooth R, G, B, grey ramps
+	{								//  (bit errors show as noise)
+		for (unsigned x = 0; x < W; x++)
+		{
+			unsigned v = x * 255 / (W - 1);
+			unsigned r = y < 6 || y >= 18 ? v : 0;
+			unsigned g = (y >= 6 && y < 12) || y >= 18 ? v : 0;
+			unsigned b = (y >= 12 && y < 18) || y >= 18 ? v : 0;
+			Ramp[y * W + x] = RGB565 (r, g, b);
+		}
+	}
+	m_LCD.Blit (0, H * 2 / 3 - 24, W, 24, Ramp);
 	m_LCD.Fill (0, H * 2 / 3, W, H / 3, GREY);			// grey band
 	for (unsigned x = 0; x < W; x += 40)				// grid in the band
 	{
@@ -110,7 +126,7 @@ TShutdownMode CKernel::Run (void)
 	unsigned nFps10[NumClocks];
 	for (unsigned i = 0; i < NumClocks; i++)
 	{
-		m_LCD.SetClock (Clocks[i]);
+		m_LCD.SetClocks (CmdClock, Clocks[i]);
 		unsigned nStart = CTimer::GetClockTicks ();
 		const unsigned nFrames = 6;
 		for (unsigned f = 0; f < nFrames; f++)
@@ -127,25 +143,26 @@ TShutdownMode CKernel::Run (void)
 	}
 
 	// Summary at the safe clock: one bar per clock, length ~ fps, with numbers.
-	m_LCD.SetClock (Clocks[0]);
+	m_LCD.SetClock (CmdClock);
 	m_LCD.Fill (0, 0, CILI9486::Width, CILI9486::Height, BLACK);
 	for (unsigned i = 0; i < NumClocks; i++)
 	{
-		unsigned y = 12 + i * 62;
+		unsigned y = 10 + i * 52;
 		char Fps[8];
 		CString s;
 		s.Format ("%u.%u", nFps10[i] / 10, nFps10[i] % 10);
 		strncpy (Fps, s, sizeof Fps - 1);
 		Fps[sizeof Fps - 1] = 0;
-		DrawNumber (10, y, 6, ClockText[i], YELLOW);
+		DrawNumber (10, y, 5, ClockText[i], YELLOW);
 		unsigned nLen = nFps10[i] * 2;			// 0.1 fps -> 2 px
-		if (nLen > 220) nLen = 220;
-		m_LCD.Fill (130, y, nLen, 30, GREEN);
-		DrawNumber (370, y, 6, Fps, WHITE);
+		if (nLen > 260) nLen = 260;
+		m_LCD.Fill (110, y, nLen, 25, GREEN);
+		DrawNumber (390, y, 5, Fps, WHITE);
 	}
 	m_Logger.Write (From, LogNotice, "Summary shown. Then cycling test patterns.");
 	CTimer::SimpleMsDelay (8000);
 
+	m_LCD.SetClocks (CmdClock, Clocks[0]);			// known-clean pair
 	for (unsigned n = 0; ; n++)				// keep showing the pattern
 	{
 		DrawTestPattern (0);

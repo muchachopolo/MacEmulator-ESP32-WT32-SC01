@@ -25,6 +25,8 @@ static const u8 InitSeq[] =
 CILI9486::CILI9486 (CSPIMaster *pSPI, unsigned nChipSelect, unsigned nDCPin, unsigned nResetPin)
 :	m_pSPI (pSPI),
 	m_nCS (nChipSelect),
+	m_nCmdHz (0),
+	m_nDataHz (0),
 	m_DC (nDCPin, GPIOModeOutput),
 	m_Reset (nResetPin, GPIOModeOutput)
 {
@@ -32,7 +34,14 @@ CILI9486::CILI9486 (CSPIMaster *pSPI, unsigned nChipSelect, unsigned nDCPin, uns
 
 void CILI9486::SetClock (unsigned nHz)
 {
-	m_pSPI->SetClock (nHz);
+	SetClocks (nHz, nHz);
+}
+
+void CILI9486::SetClocks (unsigned nCmdHz, unsigned nDataHz)
+{
+	m_nCmdHz = nCmdHz;
+	m_nDataHz = nDataHz;
+	m_pSPI->SetClock (nCmdHz);
 }
 
 void CILI9486::SendWords (const u16 *pWords, unsigned nCount)
@@ -112,12 +121,20 @@ void CILI9486::SetWindow (unsigned x0, unsigned y0, unsigned x1, unsigned y1)
 {
 	u8 Col[4] = { (u8) (x0 >> 8), (u8) x0, (u8) (x1 >> 8), (u8) x1 };
 	u8 Row[4] = { (u8) (y0 >> 8), (u8) y0, (u8) (y1 >> 8), (u8) y1 };
+	if (m_nDataHz != m_nCmdHz)
+	{
+		m_pSPI->SetClock (m_nCmdHz);
+	}
 	Command (0x2A);
 	Data (Col, 4);
 	Command (0x2B);
 	Data (Row, 4);
 	Command (0x2C);					// memory write
 	m_DC.Write (HIGH);
+	if (m_nDataHz != m_nCmdHz)
+	{
+		m_pSPI->SetClock (m_nDataHz);
+	}
 }
 
 void CILI9486::Fill (unsigned x, unsigned y, unsigned w, unsigned h, u16 nColor)

@@ -20,7 +20,10 @@ public:
 		  unsigned nDCPin = 24, unsigned nResetPin = 25);
 
 	void Initialize (void);
-	void SetClock (unsigned nHz);
+	void SetClock (unsigned nHz);				// commands and pixels
+	// Commands/parameters at nCmdHz, pixel data at nDataHz. Short transfers
+	// lose their last word above ~18 MHz on this board; long pixel streams don't.
+	void SetClocks (unsigned nCmdHz, unsigned nDataHz);
 
 	// Fill a rectangle with one RGB565 colour.
 	void Fill (unsigned x, unsigned y, unsigned w, unsigned h, u16 nColor);
@@ -35,6 +38,8 @@ private:
 
 	CSPIMaster *m_pSPI;
 	unsigned    m_nCS;
+	unsigned    m_nCmdHz;
+	unsigned    m_nDataHz;
 	CGPIOPin    m_DC;
 	CGPIOPin    m_Reset;
 	u8          m_Buf[2 * Width * 20];			// 20 lines of RGB565
