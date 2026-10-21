@@ -11,6 +11,12 @@
 #include "mac_scc.h"
 #include "mac_iwm.h"
 #include "mac_scsi.h"
+#if MAC_ROM_LC_II
+#include "mac_v8video.h"
+#include "mac_v8disk.h"
+#include "mac_egret.h"
+#endif
+#include "mac_touch.h"
 #include "m68k.h"
 
 #include <string.h>
@@ -25,8 +31,16 @@
 static const char *TAG = "mac_emu";
 
 /* Embedded ROM image (linked from flash via CMake EMBED_FILES) */
+#if MAC_ROM_LC_II && MAC_V8_CUDA
+extern const uint8_t rom_start[] asm("_binary_Color_Classic_ROM_start");
+extern const uint8_t rom_end[]   asm("_binary_Color_Classic_ROM_end");
+#elif MAC_ROM_LC_II
 extern const uint8_t rom_start[] asm("_binary_LC_II_ROM_start");
 extern const uint8_t rom_end[]   asm("_binary_LC_II_ROM_end");
+#else
+extern const uint8_t rom_start[] asm("_binary_Classic_ROM_start");
+extern const uint8_t rom_end[]   asm("_binary_Classic_ROM_end");
+#endif
 
 /* Disk image - only available if HAS_DISK_IMAGE is set in CMakeLists.txt */
 #if HAS_DISK_IMAGE
@@ -69,6 +83,7 @@ static inline void wr16(uint8_t *r, uint32_t a, uint16_t v)
     r[a]=(v>>8)&0xFF; r[a+1]=v&0xFF;
 }
 
+#if !MAC_ROM_LC_II   /* V8 posts mouse events through the emulated ADB mouse */
 /* Check if a given address is currently in the active event queue */
 static bool evt_in_queue(const uint8_t *r, uint32_t target)
 {
@@ -116,6 +131,64 @@ static void mac_post_mouse_event(uint8_t *r, int code, int mx, int my)
     }
 }
 
+#endif /* !MAC_ROM_LC_II */
+
+#if MAC_ROM_LC_II
+/* V8 touch -> cursor. Position is absolute: the movement is added to the
+ * Mac's current Mouse ($0830) and written to MTemp/RawMouse/Mouse with
+ * CrsrNew set, like the Classic build. MTemp == RawMouse means the cursor
+ * VBL task sees a zero raw delta, so no acceleration is applied and the
+ * cursor moves exactly 1:1 with the finger. The emulated ADB mouse
+ * (Egret/Cuda HLE) carries the BUTTON only (zero deltas), so clicks go
+ * through the OS's own ADB driver and event system.
+ * Movement that follows a button transition waits until that transition
+ * has been packed into an ADB packet, so the click lands where the finger
+ * was when it happened. Only position changes are written (CrsrNew
+ * CRITICAL note in CLAUDE.md), and only once the Window Manager is up. */
+static void v8_apply_touch(const touch_report_t *tr, int frame)
+{
+    static int pend_dx, pend_dy, wait_frames;
+    uint8_t *r = mac_mem_get_ram();
+
+    pend_dx += tr->dx;
+    pend_dy += tr->dy;
+    if (pend_dx || pend_dy) {
+        uint32_t wmgr = r ? rd32(r, 0x09DE) : 0xFFFFFFFF;
+        if (!mac_post_boot || wmgr == 0xFFFFFFFF || wmgr == 0) {
+            pend_dx = pend_dy = 0;          /* no cursor yet: drop */
+        } else if (egret_adb_mouse_btn_pending() && ++wait_frames < 30) {
+            /* let the queued click reach the Mac first */
+        } else {
+            int v = (int16_t)((r[0x0830] << 8) | r[0x0831]);
+            int h = (int16_t)((r[0x0832] << 8) | r[0x0833]);
+            int sw = v8video_screen_width(), shh = v8video_screen_height();
+            h += pend_dx;
+            v += pend_dy;
+            if (h < 0) h = 0; else if (h >= sw) h = sw - 1;
+            if (v < 0) v = 0; else if (v >= shh) v = shh - 1;
+            uint32_t pt = ((uint32_t)(uint16_t)v << 16) | (uint16_t)h;
+            wr32(r, 0x0828, pt);            /* MTemp */
+            wr32(r, 0x082C, pt);            /* RawMouse */
+            wr32(r, 0x0830, pt);            /* Mouse */
+            if (r[0x08CF]) r[0x08CE] = 0xFF; /* CrsrNew if CrsrCouple */
+            pend_dx = pend_dy = 0;
+            wait_frames = 0;
+        }
+    }
+    egret_adb_mouse(0, 0, tr->button);
+    if (tr->btn_changed) {
+        static int blog;
+        if (r && blog < 60) {
+            blog++;
+            ESP_LOGI(TAG, "TOUCH-BTN F%d %s at Mouse=(%d,%d)", frame,
+                     tr->button ? "DOWN" : "UP",
+                     (int16_t)((r[0x0832] << 8) | r[0x0833]),
+                     (int16_t)((r[0x0830] << 8) | r[0x0831]));
+        }
+    }
+}
+#endif
+
 bool mac_emu_init(void)
 {
     ESP_LOGI(TAG, "Initializing Macintosh Classic emulator...");
@@ -160,9 +233,14 @@ bool mac_emu_init(void)
         return false;
     }
 
-    /* Initialize Musashi 68000 CPU */
+    /* Initialize Musashi CPU. The Color Classic is a 68030: its reset code
+     * opens with a cache-control op ($F4AC) that faults on a 68000. */
     m68k_init();
+#if MAC_ROM_LC_II
     m68k_set_cpu_type(M68K_CPU_TYPE_68030);
+#else
+    m68k_set_cpu_type(M68K_CPU_TYPE_68000);
+#endif
     m68k_pulse_reset();
 
     ESP_LOGI(TAG, "CPU initialized, PC=0x%08X, SP=0x%08X",
@@ -218,13 +296,24 @@ void mac_emu_run(void *param)
     static uint32_t pc_hist[640];
     static uint32_t pc_bad_count = 0;
     static int pc_samples = 0;
-    static int hist_report_at = 3000;
+    static int hist_report_at = 600;
+#if MAC_ROM_LC_II
+    static uint32_t v8_pk[16], v8_pv[16];
+    static uint32_t v8_ring[32];
+    static uint32_t v8_ri;
+    static uint32_t v8_page[512];
+    static uint32_t v8_ps_cum;
+    static bool v8_cleared;
+#endif
 
     while (1) {
         /* Execute one frame's worth of CPU cycles */
         int cycles_remaining = MAC_CYCLES_PER_VBLANK;
         int total_executed = 0;
         bool vblank_fired = false;
+#if MAC_ROM_LC_II
+        v8video_vbl(false);   /* built-in video VBL line inactive until mid-frame */
+#endif
         uint32_t frame_cstart = esp_cpu_get_cycle_count();
 
         while (cycles_remaining > 0) {
@@ -256,15 +345,28 @@ void mac_emu_run(void *param)
             /* Read PC once per slice — shared by all post-execute checks.
              * Eliminates 7 redundant m68k_get_reg calls per slice. */
             uint32_t pc_slice = m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF;
+            static uint32_t prev_pc_xfer = 0xFFFFFFFF;
+            if (frame_count < 600 && (prev_pc_xfer & 0xFFF00000) == 0x00400000 && (pc_slice & 0xFFF00000) != 0x00400000) {
+                static int xfer_cnt = 0;
+                if (xfer_cnt < 60)
+                    ESP_LOGW(TAG, "XFER #%d: $%06X -> $%06X F%d", xfer_cnt++, prev_pc_xfer, pc_slice, frame_count);
+            }
+            prev_pc_xfer = pc_slice;
 
             /* === POST-EXECUTE PC VALIDATION ===
              * Catches runaway PC before it cascades into unrecoverable state. */
             {
                 static bool crash_detected = false;
                 if (!crash_detected) {
-                    /* Valid ranges: RAM $0-$1FFFFF, ROM $400000-$47FFFF */
+                    /* Valid ranges: RAM $0-$9FFFFF minus device windows, ROM
+                     * $A00000-$AFFFFF, ROM alias $600000-$60FFFF. */
+#if MAC_ROM_LC_II
+                    if (pc_slice >= 0xB00000 &&
+                        !(pc_slice >= V8DISK_BASE && pc_slice < V8DISK_END)) {  /* .Sony Prime stub */
+#else
                     if ((pc_slice >= 0x200000 && pc_slice < 0x400000) ||
                         pc_slice >= 0x480000) {
+#endif
                         crash_detected = true;
                         uint32_t sp_chk = m68k_get_reg(NULL, M68K_REG_SP) & 0xFFFFFF;
                         uint32_t sr_chk = m68k_get_reg(NULL, M68K_REG_SR);
@@ -301,6 +403,31 @@ void mac_emu_run(void *param)
                                 cr[sp_chk+8],cr[sp_chk+9],cr[sp_chk+10],cr[sp_chk+11],
                                 cr[sp_chk+12],cr[sp_chk+13],cr[sp_chk+14],cr[sp_chk+15]);
                         }
+                        if (cr && crsz >= 0x100000) {
+                            uint32_t pco = pc_slice & (crsz - 1);
+                            ESP_LOGE(TAG, "  PCBYTES@%06X: %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X",
+                                pco,
+                                cr[pco],cr[pco+1],cr[pco+2],cr[pco+3],
+                                cr[pco+4],cr[pco+5],cr[pco+6],cr[pco+7],
+                                cr[pco+8],cr[pco+9],cr[pco+10],cr[pco+11],
+                                cr[pco+12],cr[pco+13],cr[pco+14],cr[pco+15]);
+                        }
+#if MAC_ROM_LC_II
+                        extern uint32_t v8_fetch_ring[256];
+                        extern int v8_fetch_idx;
+                        {
+                            int first = v8_fetch_idx < 256 ? 0 : (v8_fetch_idx & 255);
+                            int n = v8_fetch_idx < 256 ? v8_fetch_idx : 256;
+                            ESP_LOGE(TAG, "  FETCH-RING last %d 16-bit bus reads:", n);
+                            for (int i = 0; i < n; i += 8) {
+                                ESP_LOGE(TAG, "   %06X %06X %06X %06X %06X %06X %06X %06X",
+                                    v8_fetch_ring[(first+i+0)&255], v8_fetch_ring[(first+i+1)&255],
+                                    v8_fetch_ring[(first+i+2)&255], v8_fetch_ring[(first+i+3)&255],
+                                    v8_fetch_ring[(first+i+4)&255], v8_fetch_ring[(first+i+5)&255],
+                                    v8_fetch_ring[(first+i+6)&255], v8_fetch_ring[(first+i+7)&255]);
+                            }
+                        }
+#endif
                         /* Trap ring dump */
                         {
                             int n = trap_ring_idx < 32 ? trap_ring_idx : 32;
@@ -323,8 +450,9 @@ void mac_emu_run(void *param)
                             ESP_LOGE(TAG, "  DSErr=%d MemErr=%d BusErrVec=$%06X AddrErrVec=$%06X",
                                      ds_err, mem_err, buserr_vec & 0xFFFFFF, addrerr_vec & 0xFFFFFF);
                         }
-                        /* Recovery: redirect to tight loop */
-                        if (cr) {
+                        /* Recovery: redirect to tight loop (Classic only — on V8
+                         * it masks the real fault) */
+                        if (cr && !MAC_ROM_LC_II) {
                             m68k_set_reg(M68K_REG_SP, 0x0FFA00);
                             m68k_set_reg(M68K_REG_PC, 0x000036);
                             ESP_LOGW(TAG, "CRASH-RECOVERY: PC=$0036 SP=$0FFA00");
@@ -337,6 +465,9 @@ void mac_emu_run(void *param)
              * even if it reads ORA (which clears CA1) earlier in the loop */
             if (!vblank_fired && total_executed >= MAC_CYCLES_PER_VBLANK / 2) {
                 via_vblank();
+#if MAC_ROM_LC_II
+                v8video_vbl(true);
+#endif
                 vblank_fired = true;
             }
 
@@ -349,6 +480,7 @@ void mac_emu_run(void *param)
              * 3. 0x401D96: TST.L D6 in second memory test (0x401D3E)
              * Clear D6 at ALL THREE so the ROM always sees "all tests passed". */
             if (frame_count < 80) {
+#if !MAC_ROM_LC_II
                 if (pc_slice == 0x401CF0 || pc_slice == 0x401D80 || pc_slice == 0x401D96) {
                     uint32_t old_d6 = m68k_get_reg(NULL, M68K_REG_D6);
                     if (old_d6 != 0) {
@@ -357,6 +489,7 @@ void mac_emu_run(void *param)
                                  pc_slice, frame_count, old_d6);
                     }
                 }
+#endif
             }
 
             /* Log when normal boot entry is reached */
@@ -373,10 +506,12 @@ void mac_emu_run(void *param)
              * scans the bus during boot AND INIT loading. Without this
              * bypass, the scan causes heap corruption (crash at F5239). */
             {
+#if !MAC_ROM_LC_II
                 if (pc_slice == 0x41A44A || pc_slice == 0x41A44E || pc_slice == 0x41A452) {
                     m68k_set_reg(M68K_REG_D1, 0);
                     m68k_set_reg(M68K_REG_D5, 0);
                 }
+#endif
             }
 
             /* DM-spin rescue handled at instruction-fetch level in mac_memory.c
@@ -390,6 +525,7 @@ void mac_emu_run(void *param)
              * SWIM driver can't complete sector reads, fulfill the request
              * directly from the disk image and set ioResult=0. */
             if (mac_boot_read_bypass) {
+#if !MAC_ROM_LC_II
                 if (pc_slice == 0x404332) {
                     static int io_bypass_count = 0;
                     static int io_poll_count = 0;
@@ -483,6 +619,7 @@ void mac_emu_run(void *param)
                         }
                     }
                 }
+#endif
             }
 
             /* ROM flow PC trace: log key decision points.
@@ -908,13 +1045,41 @@ void mac_emu_run(void *param)
                             s_logged = true;
                         }
                     }
+#if MAC_ROM_LC_II
+                    else if (pcd == 0x600EBE || pcd == 0x600352) {
+                        static int v8dec = 0;
+                        if (v8dec < 12) {
+                            ESP_LOGW(TAG, "V8DEC #%d: PC=%06X A0=%06X A1=%06X A3=%06X D6=%08X",
+                                     v8dec++, pcd,
+                                     m68k_get_reg(NULL, M68K_REG_A0) & 0xFFFFFF,
+                                     m68k_get_reg(NULL, M68K_REG_A1) & 0xFFFFFF,
+                                     m68k_get_reg(NULL, M68K_REG_A3) & 0xFFFFFF,
+                                     m68k_get_reg(NULL, M68K_REG_D6));
+                        }
+                    }
+#endif
+#if MAC_ROM_LC_II
+                    else if (pcd >= 0x5FFFD2 && pcd < 0x610000) {
+                        static int sm_log = 0;
+                        static uint32_t last_sm_pc = 0xFFFFFFFF;
+                        if (sm_log < 60 && pcd != last_sm_pc) {
+                            last_sm_pc = pcd;
+                            ESP_LOGW(TAG, "SM #%d: PC=%06X F%d", sm_log++, pcd, frame_count);
+                        }
+                    }
+#endif
                     else if (pcd >= 0x100000 && pcd < 0x200000) {
                         static int bb_log = 0;
                         static uint32_t last_bb_pc = 0;
                         if (bb_log < 40) {
-                            ESP_LOGW(TAG, "BB PC=%06X SP=%06X F%d",
+                            uint8_t *rr = mac_mem_get_ram();
+                            uint32_t rsz = mac_mem_get_ram_size();
+                            uint32_t ro = pcd & (rsz - 1);
+                            ESP_LOGW(TAG, "BB PC=%06X SP=%06X F%d B=%02X%02X%02X%02X",
                                      pcd, m68k_get_reg(NULL, M68K_REG_SP) & 0xFFFFFF,
-                                     frame_count);
+                                     frame_count,
+                                     rr ? rr[ro] : 0, rr ? rr[ro+1] : 0,
+                                     rr ? rr[ro+2] : 0, rr ? rr[ro+3] : 0);
                             bb_log++;
                         }
                         last_bb_pc = pcd;
@@ -1001,7 +1166,7 @@ void mac_emu_run(void *param)
                             /* === CRASH RECOVERY ===
                              * Prevent cascade: redirect to tight loop, reset SP.
                              * Don't touch MemTop/ScrnBase — use ROM's values. */
-                            if (!crash_recovered && rram) {
+                            if (!crash_recovered && rram && !MAC_ROM_LC_II) {
                                 crash_recovered = true;
                                 m68k_set_reg(M68K_REG_SP, 0x0FFA00);
                                 m68k_set_reg(M68K_REG_PC, 0x000036);
@@ -1043,6 +1208,7 @@ void mac_emu_run(void *param)
                         static int c5 = 0;
                         if (c5++ < 10) ESP_LOGW(TAG, "CALLER-436B18 F%d", frame_count);
                     }
+#if !MAC_ROM_LC_II
                     /* SEC-RD drive ≥ 4 bypass: at $4357F4, BGE $435856
                      * skips the sector-read sub for drives with DV+$12 ≥ 4.
                      * Our drive is #5 (DV+$12=5).  Force BGE to fall through
@@ -1055,6 +1221,7 @@ void mac_emu_run(void *param)
                         sr &= ~0x0002;  /* Clear V */
                         m68k_set_reg(M68K_REG_SR, sr);
                     }
+#endif
                     /* Also trace $435196 and $435538 — the ISM/IWM branch points */
                     else if (pcd == 0x435196) {
                         static int c6 = 0;
@@ -1265,11 +1432,15 @@ void mac_emu_run(void *param)
             via_tick(executed);
 
             /* Check for VIA interrupt -> raise CPU IRQ level 1 */
+#if MAC_ROM_LC_II
+            via_update_cpu_irq();       /* also level 2 (pseudo-VIA2) */
+#else
             if (via_irq_pending()) {
                 m68k_set_irq(M68K_IRQ_1);
             } else {
                 m68k_set_irq(M68K_IRQ_NONE);
             }
+#endif
         }
 
         /* Boot-only per-frame checks (single PC read shared between them) */
@@ -1321,9 +1492,36 @@ void mac_emu_run(void *param)
                               ((uint32_t)rp[0x90A]<<8)|rp[0x90B];
                 ESP_LOGW(TAG, "F100: MemTop=$%08lX ScrnBase=$%08lX StkBase=$%08lX",
                          (unsigned long)mt, (unsigned long)sb, (unsigned long)sk);
+                ESP_LOGW(TAG, "F100CONT $0FFAB0-$0FFAC0:");
+                for (int ci = 0; ci < 16; ci += 16) {
+                    uint32_t ca = 0x0FFAB0 + ci;
+                    ESP_LOGW(TAG, "  $%06X %08X %08X %08X %08X", ca,
+                             (rp[ca]<<24)|(rp[ca+1]<<16)|(rp[ca+2]<<8)|rp[ca+3],
+                             (rp[ca+4]<<24)|(rp[ca+5]<<16)|(rp[ca+6]<<8)|rp[ca+7],
+                             (rp[ca+8]<<24)|(rp[ca+9]<<16)|(rp[ca+10]<<8)|rp[ca+11],
+                             (rp[ca+12]<<24)|(rp[ca+13]<<16)|(rp[ca+14]<<8)|rp[ca+15]);
+                }
+                ESP_LOGW(TAG, "F100CONT $100000-$100040:");
+                for (int ci = 0; ci < 64; ci += 16) {
+                    uint32_t ca = 0x100000 + ci;
+                    ESP_LOGW(TAG, "  $%06X %08X %08X %08X %08X", ca,
+                             (rp[ca]<<24)|(rp[ca+1]<<16)|(rp[ca+2]<<8)|rp[ca+3],
+                             (rp[ca+4]<<24)|(rp[ca+5]<<16)|(rp[ca+6]<<8)|rp[ca+7],
+                             (rp[ca+8]<<24)|(rp[ca+9]<<16)|(rp[ca+10]<<8)|rp[ca+11],
+                             (rp[ca+12]<<24)|(rp[ca+13]<<16)|(rp[ca+14]<<8)|rp[ca+15]);
+                }
+                ESP_LOGW(TAG, "F100CONT $100280-$100290:");
+                for (int ci = 0; ci < 16; ci += 16) {
+                    uint32_t ca = 0x100280 + ci;
+                    ESP_LOGW(TAG, "  $%06X %08X %08X %08X %08X", ca,
+                             (rp[ca]<<24)|(rp[ca+1]<<16)|(rp[ca+2]<<8)|rp[ca+3],
+                             (rp[ca+4]<<24)|(rp[ca+5]<<16)|(rp[ca+6]<<8)|rp[ca+7],
+                             (rp[ca+8]<<24)|(rp[ca+9]<<16)|(rp[ca+10]<<8)|rp[ca+11],
+                             (rp[ca+12]<<24)|(rp[ca+13]<<16)|(rp[ca+14]<<8)|rp[ca+15]);
+                }
             }
         }
-        if (frame_count == 600) {
+        if (frame_count == 600 && !MAC_ROM_LC_II) {  /* Classic-only boot patches (LC II: vectors/$2000 stub/DrvQ hacks break the V8 boot) */
             mac_boot_read_bypass = true;
             ESP_LOGW(TAG, "BYPASS: All patches at F%d", frame_count);
 
@@ -2033,6 +2231,26 @@ void mac_emu_run(void *param)
                      frame_count, v0172, diag_pc, diag_sp, diag_a5, diag_a6,
                      iwm_get_sense_poll_count(),
                      iwm_get_sense_poll_ism());
+            if (frame_count == 1200 && ram_diag) {
+                for (int i = 0; i < 8; i++) {
+                    uint32_t v = ((uint32_t)ram_diag[0x28000+i*4]<<24)|((uint32_t)ram_diag[0x28001+i*4]<<16)|
+                                 ((uint32_t)ram_diag[0x28002+i*4]<<8)|ram_diag[0x28003+i*4];
+                    ESP_LOGW(TAG, "OSVEC F%d $%04X: $%08lX", frame_count, 0x28000+i*4, (unsigned long)v);
+                }
+                for (int i = 0; i < 8; i++) {
+                    uint32_t v = ((uint32_t)ram_diag[0x0E00+i*4]<<24)|((uint32_t)ram_diag[0x0E01+i*4]<<16)|
+                                 ((uint32_t)ram_diag[0x0E02+i*4]<<8)|ram_diag[0x0E03+i*4];
+                    ESP_LOGW(TAG, "TBVEC F%d $%04X: $%08lX", frame_count, 0x0E00+i*4, (unsigned long)v);
+                }
+                for (uint32_t a = 0x2F1C; a < 0x3150; a += 16) {
+                    ESP_LOGW(TAG, "BOOT3-CODE $%04X: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
+                             a,
+                             ram_diag[a],     ram_diag[a+1],  ram_diag[a+2],  ram_diag[a+3],
+                             ram_diag[a+4],   ram_diag[a+5],  ram_diag[a+6],  ram_diag[a+7],
+                             ram_diag[a+8],   ram_diag[a+9],  ram_diag[a+10], ram_diag[a+11],
+                             ram_diag[a+12],  ram_diag[a+13], ram_diag[a+14], ram_diag[a+15]);
+                }
+            }
             /* Dump key low-memory globals */
             if (ram_diag) {
                 uint32_t memtop   = ((uint32_t)ram_diag[0x108]<<24)|((uint32_t)ram_diag[0x109]<<16)|
@@ -2140,6 +2358,31 @@ void mac_emu_run(void *param)
                         uint32_t sz = sz_addr & 0xFFFFFF;
                         uint32_t az = az_addr & 0xFFFFFF;
                         ESP_LOGW(TAG, "  SysZone=$%06X ApplZone=$%06X", sz, az);
+
+                        uint32_t td_h = ((uint32_t)ram_diag[0xCA6]<<24)|
+                                        ((uint32_t)ram_diag[0xCA7]<<16)|
+                                        ((uint32_t)ram_diag[0xCA8]<<8)|ram_diag[0xCA9];
+                        uint32_t td_g = td_h & 0xFFFFFF;
+                        if (td_g + 0x14 < rsz) {
+                            uint32_t td_p = (((uint32_t)ram_diag[td_g+4]<<24)|
+                                             ((uint32_t)ram_diag[td_g+5]<<16)|
+                                             ((uint32_t)ram_diag[td_g+6]<<8)|ram_diag[td_g+7]) & 0xFFFFFF;
+                            uint16_t td_bmhb = (ram_diag[td_g+8]<<8)|ram_diag[td_g+9];
+                            uint16_t td_bm_vb = (ram_diag[td_g+0xA]<<8)|ram_diag[td_g+0xB];
+                            uint16_t td_cm = (ram_diag[td_g+0x10]<<8)|ram_diag[td_g+0x11];
+                            uint32_t td_base = 0;
+                            uint16_t td_rb = 0;
+                            if (td_p + 0xE < rsz) {
+                                td_base = (((uint32_t)ram_diag[td_p+8]<<24)|
+                                           ((uint32_t)ram_diag[td_p+9]<<16)|
+                                           ((uint32_t)ram_diag[td_p+0xA]<<8)|ram_diag[td_p+0xB]) & 0xFFFFFF;
+                                td_rb = (ram_diag[td_p+0xC]<<8)|ram_diag[td_p+0xD];
+                            }
+                            ESP_LOGW(TAG, "  TheDisplay hdl=$%06X gdev=$%06X port=$%06X base=$%06X rb=%u bmH=%u bmV=%u cm=%d",
+                                     (unsigned long)td_h, (unsigned long)td_g, (unsigned long)td_p,
+                                     (unsigned long)td_base, (unsigned)td_rb,
+                                     (unsigned)td_bmhb, (unsigned)td_bm_vb, (int)td_cm);
+                        }
 
                         /* Dump SysZone header: bkLim(+0), zcbFree(+12), gzProc(+16) */
                         if (sz + 52 < rsz) {
@@ -2652,11 +2895,46 @@ void mac_emu_run(void *param)
 
         frame_count++;
 
-        if (mac_post_boot && (frame_count & 63) == 0) {
+#if MAC_ROM_LC_II
+        v8disk_frame();   /* .Sony Prime -> embedded image (mac_v8disk.c) */
+        {
+            uint32_t pc_ring = m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF;
+            v8_ring[v8_ri & 31] = pc_ring;
+            v8_ri++;
+            if (pc_ring < 0x800000) v8_page[pc_ring >> 14]++;
+            else if (pc_ring >= 0xA00000 && pc_ring < 0xA80000) v8_page[500 + ((pc_ring >> 14) & 7)]++;
+            v8_ps_cum++;
+            if (mac_post_boot && !v8_cleared) {
+                v8_cleared = true;
+                v8_ps_cum = 1;
+                for (int i = 0; i < 512; i++) v8_page[i] = 0;
+                for (int i = 0; i < 16; i++) v8_pv[i] = 0;
+            }
+        }
+        if ((frame_count & 3) == 0) {
+#else
+        if ((frame_count & 63) == 0) {
+#endif
             uint32_t pc = m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF;
+#if MAC_ROM_LC_II
+            if (pc < 0x800000 || (pc >= 0xA00000 && pc < 0xA80000)) {
+                uint32_t key = (pc >> 4) + 1;
+                int h = (int)((key * 2654435761u) >> 28) & 15;
+                int tries = 0;
+                while (tries < 16 && v8_pk[h] && v8_pk[h] != key) { h = (h + 1) & 15; tries++; }
+                if (tries == 16) {
+                    int min = 0;
+                    for (int i = 1; i < 16; i++)
+                        if (v8_pv[i] < v8_pv[min]) min = i;
+                    v8_pk[min] = key; v8_pv[min] = 1;
+                } else if (v8_pk[h]) v8_pv[h]++;
+                else { v8_pk[h] = key; v8_pv[h] = 1; }
+            } else pc_bad_count++;
+#else
             if (pc < 0x200000) pc_hist[pc >> 12]++;
             else if (pc >= 0x400000 && pc < 0x480000) pc_hist[512 + ((pc - 0x400000) >> 12)]++;
             else pc_bad_count++;
+#endif
             pc_samples++;
         }
 
@@ -2703,6 +2981,9 @@ void mac_emu_run(void *param)
          * If it wasn't fired this frame (shouldn't happen), fire it now. */
         if (!vblank_fired) {
             via_vblank();
+#if MAC_ROM_LC_II
+            v8video_vbl(true);
+#endif
         }
 
         /* Write mouse state to Mac low-memory globals once per frame.
@@ -2712,6 +2993,10 @@ void mac_emu_run(void *param)
          * mouse position/button actually changes. Writing CrsrNew=$FF
          * unconditionally during INIT/Finder loading crashes the resource
          * decompressor (DCMP) — cursor redraw interrupts corrupt its state. */
+#if !MAC_ROM_LC_II
+        /* (V8 builds skip this: v8_apply_touch() writes the position and
+         * the button goes through the emulated ADB mouse, whose OS driver
+         * posts the events.) */
         if (mac_post_boot) {
             uint8_t *r = mac_mem_get_ram();
             /* Check WMgrPort at $09DE — $FFFFFFFF means Window Manager not yet init'd */
@@ -2789,6 +3074,7 @@ void mac_emu_run(void *param)
                 }
             }
         }
+#endif /* !MAC_ROM_LC_II */
 
         /* One-second interrupt every 60 frames (~1Hz) */
         if (frame_count % 60 == 0) {
@@ -2811,7 +3097,96 @@ void mac_emu_run(void *param)
                 ESP_LOGI(TAG, "SPEED: %d frames in %dms (mac=%dms) => %d%% real-time",
                          frames_done, wall_ms, mac_ms, speed_pct);
                 ESP_LOGI(TAG, "MACPC: %06X", m68k_get_reg(NULL, M68K_REG_PC));
+#if MAC_ROM_LC_II
+                extern uint32_t v8_iwm_reads;
+                ESP_LOGI(TAG, "IWMR: %lu reads", (unsigned long)v8_iwm_reads);
+                v8_iwm_reads = 0;
+#endif
                 if (frame_count >= hist_report_at && pc_samples > 0) {
+#if MAC_ROM_LC_II
+                    uint32_t hotpc = 0;
+                    for (int rank = 0; rank < 3; rank++) {
+                        int best = -1;
+                        uint32_t bestv = 0;
+                        for (int i = 0; i < 16; i++)
+                            if (v8_pv[i] > bestv) { bestv = v8_pv[i]; best = i; }
+                        if (best < 0 || bestv == 0) break;
+                        if (rank == 0) hotpc = (v8_pk[best] - 1) << 4;
+                        ESP_LOGI(TAG, "PC-EXACT: pc=%06X share=%d%% count=%lu",
+                                 ((v8_pk[best] - 1) << 4), (int)(bestv * 100 / pc_samples), (unsigned long)bestv);
+                        v8_pv[best] = 0;
+                    }
+                    for (int i = 0; i < 16; i++) v8_pv[i] = 0;
+                    {
+                        uint8_t *rdh = mac_mem_get_ram();
+                        bool allzero = false;
+                        if (rdh && hotpc && hotpc < 0x800000) {
+                            allzero = true;
+                            char hexbuf[3 * 32 + 1];
+                            int o = 0;
+                            for (int bi = 0; bi < 32; bi++) {
+                                uint8_t b = rdh[((hotpc + bi) & 0x1FFFFF)];
+                                if (b) allzero = false;
+                                hexbuf[o++] = "0123456789ABCDEF"[b >> 4];
+                                hexbuf[o++] = "0123456789ABCDEF"[b & 15];
+                                hexbuf[o++] = ' ';
+                            }
+                            hexbuf[o] = 0;
+                            ESP_LOGI(TAG, "HOTBYTES @%06X: %s", hotpc, hexbuf);
+                        }
+                        if (allzero) {
+                            char ringbuf[16 * 7 + 1];
+                            int o = 0;
+                            for (int k = 0; k < 16; k++) {
+                                uint32_t p = v8_ring[(v8_ri + k) & 31];
+                                for (int d = 5; d >= 0; d--)
+                                    ringbuf[o++] = "0123456789ABCDEF"[(p >> (4 * d)) & 15];
+                                ringbuf[o++] = ' ';
+                            }
+                            ringbuf[o] = 0;
+                            ESP_LOGI(TAG, "RING: %s", ringbuf);
+                            if (rdh) {
+                                uint32_t prev = 0;
+                                bool prev_zero = false;
+                                for (int k = 0; k < 16; k++) {
+                                    uint32_t p = v8_ring[(v8_ri + k) & 31];
+                                    bool z = false;
+                                    if (p < 0x800000) {
+                                        z = true;
+                                        for (int bi = 0; bi < 16; bi++)
+                                            if (rdh[(p + bi) & 0x1FFFFF]) { z = false; break; }
+                                    }
+                                    if (z && !prev_zero && prev) {
+                                        ESP_LOGI(TAG, "ZEROIN: prev=%06X pc=%06X", prev, p);
+                                        break;
+                                    }
+                                    prev = p;
+                                    prev_zero = z;
+                                }
+                            }
+                        }
+                    }
+                    {
+                        int seen[3];
+                        for (int rank = 0; rank < 3; rank++) {
+                            int best = -1;
+                            uint32_t bestv = 0;
+                            for (int i = 0; i < 512; i++) {
+                                int dup = 0;
+                                for (int s = 0; s < rank; s++)
+                                    if (seen[s] == i) { dup = 1; break; }
+                                if (!dup && v8_page[i] > bestv) { bestv = v8_page[i]; best = i; }
+                            }
+                            if (best < 0 || bestv == 0) break;
+                            seen[rank] = best;
+                            uint32_t base = (best < 500) ? ((uint32_t)best << 14)
+                                                         : (0xA00000u + ((uint32_t)(best - 500) << 14));
+                            ESP_LOGI(TAG, "PAGE: base=%06X count=%lu share=%d%%",
+                                     base, (unsigned long)bestv,
+                                     (int)(v8_ps_cum ? bestv * 100 / v8_ps_cum : 0));
+                        }
+                    }
+#else
                     int seen_idx[10];
                     for (int rank = 0; rank < 10; rank++) {
                         int best = -1;
@@ -2825,13 +3200,18 @@ void mac_emu_run(void *param)
                         if (best < 0 || bestv == 0) break;
                         seen_idx[rank] = best;
                         uint32_t page = (best < 512) ? ((uint32_t)best << 12)
+#if MAC_ROM_LC_II
+                            : (0xA00000u + ((uint32_t)(best - 512) << 12));
+#else
                             : (0x400000u + ((uint32_t)(best - 512) << 12));
+#endif
                         ESP_LOGI(TAG, "PC-HIST: page=%06X share=%d%% count=%lu",
                                  page, (int)(bestv * 100 / pc_samples), (unsigned long)bestv);
                     }
+#endif
                     ESP_LOGI(TAG, "BADPC: %lu bad of %d samples",
                              (unsigned long)pc_bad_count, pc_samples);
-                    hist_report_at = frame_count + 3000;
+                    hist_report_at = frame_count + (mac_post_boot ? 3000 : 600);
                 }
                 /* Profiling breakdown: exec vs overhead */
                 if (prof_frame_count > 0 && prof_total_sum > 0) {
@@ -2851,103 +3231,35 @@ void mac_emu_run(void *param)
             }
         }
 
-        /* Touch input: trackpad-style relative movement.
+        /* Touch input: trackpad-style gestures (mac_touch.c).
          * - Swipe/drag: moves cursor, NO button press
          * - Quick tap (< 300ms, < 8px movement): generates click
          * - Tap-then-drag: tap once, then touch again within 400ms
-         *   to click-and-drag (for moving windows/icons) */
+         *   to click-and-drag (for moving windows/icons)
+         * The panel is sampled by its own task on the ESP32
+         * (TOUCH_SAMPLER_TASK) or inline here every 16 ms (host); the loop
+         * consumes the accumulated movement/button once per frame. */
         {
-            static int64_t last_poll_us = 0;
-            static bool was_touching = false;
-            static int last_tx = 0, last_ty = 0;
-
-            /* Tap detection */
-            static int64_t touch_start_us = 0;
-            static int start_tx = 0, start_ty = 0;
-            static bool is_drag = false;       /* finger moved past threshold */
-            static int64_t last_tap_us = 0;    /* time of last tap-release */
-            static bool tap_drag = false;       /* in tap-then-drag mode */
-            static int tap_frames = 0;          /* frames since tap fired */
-
-            #define TAP_MOVE_THRESH  8      /* px: beyond this = drag */
-            #define TAP_TIME_US      300000 /* 300ms: max tap duration */
-            #define TAP_DRAG_WINDOW  400000 /* 400ms: second touch = tap-drag */
-
-            int64_t now_us = esp_timer_get_time();
-            if (now_us - last_poll_us > 16000) {  /* ~60Hz */
-                last_poll_us = now_us;
-                int tx, ty;
-                bool touch = display_get_touch(&tx, &ty);
-
-                /* Tap click has a 2-frame duration: frame N=down, frame N+1=up */
-                if (tap_frames > 0) {
-                    tap_frames--;
-                    if (tap_frames == 0) {
-                        mouse_button = false;  /* release after 1 frame */
-                    }
+            touch_poll_inline(esp_timer_get_time());
+            touch_report_t tr;
+            touch_consume(&tr);
+#if MAC_ROM_LC_II
+            v8_apply_touch(&tr, frame_count);
+#else
+            if (tr.dx || tr.dy || tr.button != mouse_button)
+                mac_emu_set_mouse(mouse_x + tr.dx, mouse_y + tr.dy, tr.button);
+#endif
+            {
+                static bool prev_touch, prev_btn;
+                static int tlog;
+                if ((tr.touching != prev_touch || tr.button != prev_btn) && tlog < 60) {
+                    tlog++;
+                    ESP_LOGI(TAG, "TOUCH F%d %s btn=%d drag=%d tapdrag=%d",
+                             frame_count, tr.touching ? "down" : "up", tr.button,
+                             tr.is_drag, tr.tap_drag);
                 }
-
-                if (touch) {
-                    if (!was_touching) {
-                        /* Finger just went down */
-                        touch_start_us = now_us;
-                        start_tx = tx;
-                        start_ty = ty;
-                        is_drag = false;
-
-                        /* Check for tap-then-drag: second touch within
-                         * TAP_DRAG_WINDOW of last tap = click-and-drag */
-                        if (last_tap_us > 0 &&
-                            (now_us - last_tap_us) < TAP_DRAG_WINDOW) {
-                            tap_drag = true;
-                            mouse_button = true;
-                        } else {
-                            tap_drag = false;
-                        }
-                    } else {
-                        /* Continued touch: calculate delta */
-                        int dx = -(ty - last_ty);  /* axes swapped + inverted */
-                        int dy = tx - last_tx;
-
-                        /* Detect if this became a drag */
-                        if (!is_drag) {
-                            int tdx = -(ty - start_ty);
-                            int tdy = tx - start_tx;
-                            if (tdx*tdx + tdy*tdy > TAP_MOVE_THRESH*TAP_MOVE_THRESH) {
-                                is_drag = true;
-                            }
-                        }
-
-                        /* Move cursor on drag (no button unless tap-drag) */
-                        if (is_drag && (dx != 0 || dy != 0)) {
-                            mac_emu_set_mouse(
-                                mouse_x + dx,
-                                mouse_y + dy,
-                                mouse_button
-                            );
-                        }
-                    }
-                    was_touching = true;
-                    last_tx = tx;
-                    last_ty = ty;
-                } else {
-                    /* Finger lifted */
-                    if (was_touching) {
-                        int64_t dur = now_us - touch_start_us;
-                        if (!is_drag && dur < TAP_TIME_US) {
-                            /* Quick tap: generate click (down for 1 frame) */
-                            mouse_button = true;
-                            tap_frames = 2;  /* will release after 1 more frame */
-                            last_tap_us = now_us;
-                        } else {
-                            /* Drag ended or long press: release button */
-                            mouse_button = false;
-                            tap_drag = false;
-                            last_tap_us = 0;
-                        }
-                    }
-                    was_touching = false;
-                }
+                prev_touch = tr.touching;
+                prev_btn = tr.button;
             }
         }
 
@@ -2967,9 +3279,9 @@ const uint8_t *mac_emu_get_screen(void)
 void mac_emu_set_mouse(int x, int y, bool button)
 {
     if (x < 0) x = 0;
-    if (x >= MAC_SCREEN_WIDTH) x = MAC_SCREEN_WIDTH - 1;
+    if (x >= MAC_VIS_WIDTH) x = MAC_VIS_WIDTH - 1;
     if (y < 0) y = 0;
-    if (y >= MAC_SCREEN_HEIGHT) y = MAC_SCREEN_HEIGHT - 1;
+    if (y >= MAC_VIS_HEIGHT) y = MAC_VIS_HEIGHT - 1;
 
     mouse_x = x;
     mouse_y = y;

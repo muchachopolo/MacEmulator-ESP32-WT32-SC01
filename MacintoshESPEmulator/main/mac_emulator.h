@@ -26,8 +26,28 @@ extern "C" {
 #define MAC_SCREEN_STRIDE   64          /* bytes per scanline (512/8) */
 #define MAC_SCREEN_SIZE     (MAC_SCREEN_STRIDE * MAC_SCREEN_HEIGHT) /* 21888 bytes */
 
+/* Classic native-LCD mode ("screen hack", Mini vMac precedent): ROM patches
+ * shrink the Mac's VISIBLE screen to the LCD's 480x320 (CrsrPin, ScrnSize,
+ * ScrnBitMap -> QuickDraw screenBits.bounds). The framebuffer keeps its
+ * 512x342 / rowBytes 64 layout at ScrnBase; columns 480-511 and rows
+ * 320-341 just become unused margin. The renderer then copies 1:1.
+ * 0 = stock 512x342, scaled to the LCD. Ignored by the V8 (LC II) build,
+ * which has its own native mode (mac_v8video.c). */
+#ifndef CLASSIC_NATIVE_LCD
+#define CLASSIC_NATIVE_LCD  1
+#endif
+#if CLASSIC_NATIVE_LCD && !MAC_ROM_LC_II
+#define MAC_VIS_WIDTH       480
+#define MAC_VIS_HEIGHT      320
+#else
+#define MAC_VIS_WIDTH       MAC_SCREEN_WIDTH
+#define MAC_VIS_HEIGHT      MAC_SCREEN_HEIGHT
+#endif
+
 /* RAM/ROM sizes */
+#ifndef MAC_RAM_SIZE        /* overridable for host experiments */
 #define MAC_RAM_SIZE        (2 * 1024 * 1024)   /* 2MB RAM (power-of-2 for correct ROM sizing) */
+#endif
 #define MAC_ROM_SIZE        (512 * 1024)         /* 512KB ROM */
 
 /* Timing */

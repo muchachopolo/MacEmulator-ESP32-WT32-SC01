@@ -150,7 +150,15 @@ bool display_init(void)
 
 void display_draw(int x, int y, int w, int h, const uint16_t *data)
 {
-    esp_lcd_panel_draw_bitmap(lcd_panel, x, y, x + w, y + h, data);
+    esp_err_t err = esp_lcd_panel_draw_bitmap(lcd_panel, x, y, x + w, y + h, data);
+    if (err != ESP_OK) {
+        static bool once = false;
+        if (!once) {
+            once = true;
+            ESP_LOGE(TAG, "draw_bitmap failed @%d,%d %dx%d: %s", x, y, w, h, esp_err_to_name(err));
+        }
+        return;
+    }
     /* Wait for DMA transfer to complete */
     xSemaphoreTake(draw_done_sem, portMAX_DELAY);
 }

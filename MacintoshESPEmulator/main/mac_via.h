@@ -69,9 +69,16 @@ void via_tick(int cycles);
 
 /* Returns true if VIA has a pending interrupt */
 bool via_irq_pending(void);
+#if MAC_ROM_LC_II
+/* V8: drive the CPU IRQ level from VIA1 (1) and pseudo-VIA2 (2) */
+void via_update_cpu_irq(void);
+#endif
 
 /* Get the overlay state (true = ROM mapped at address 0) */
 bool via_get_overlay(void);
+
+/* Turn the ROM overlay at $0 off permanently */
+void via_clear_overlay(void);
 
 /* True once overlay has been OFF at least once (vectors copied to RAM) */
 bool via_get_overlay_was_off(void);
@@ -87,10 +94,17 @@ void via_set_mouse_button(bool pressed);
 /* Enable ADB shift register interrupt emulation (call after boot reaches INITs) */
 void via_set_adb_active(bool active);
 
+/* Egret HLE hooks (V8): drive PB3 TREQ (active low) and complete a shift
+ * (in = byte shifted into SR from Egret) by setting IFR.SR. */
+void via_egret_set_treq(bool asserted);
+void via_egret_shift_done(bool in, uint8_t byte);
+uint8_t via_get_sr(void);
+
 /* Debug getters for diagnostic logging */
 uint8_t via_get_ifr(void);
 uint8_t via_get_ier(void);
 uint8_t via_get_acr(void);
+uint8_t via_get_ora(void);   /* V8 SWIM: PA5 = drive SEL line */
 uint16_t via_get_t1(void);
 uint16_t via_get_t2(void);
 

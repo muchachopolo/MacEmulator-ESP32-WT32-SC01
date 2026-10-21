@@ -29,6 +29,14 @@ extern "C" {
  *   Rest: same as above
  */
 
+/* MAC_DIAG: 1 = keep the boot-era diagnostic watchpoints, fetch rings,
+ * spin detectors and ROM-entry loggers on the memory hot paths (historical
+ * behaviour, needed when debugging a boot). 0 (default) compiles them out
+ * for speed. Functional bypasses/guards are never gated by this switch. */
+#ifndef MAC_DIAG
+#define MAC_DIAG 0
+#endif
+
 /* Initialize memory subsystem. rom_data/rom_size are the ROM image.
  * disk_data/disk_size are optional disk image. */
 bool mac_mem_init(const uint8_t *rom_data, uint32_t rom_size,

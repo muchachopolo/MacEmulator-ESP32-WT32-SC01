@@ -18,6 +18,7 @@
  *   6: Mode0/Stat0 7: Handshake/Mode1
  */
 #include "mac_iwm.h"
+#include "mac_via.h"
 #include "mac_memory.h"
 #include "m68k.h"
 #include <stdio.h>
@@ -94,9 +95,19 @@ typedef struct {
     uint8_t ism_setup;      /* ISM setup register */
     uint8_t ism_mode0;      /* ISM mode0 register */
     uint8_t ism_mode1;      /* ISM mode1 register */
+    /* Real SWIM mode register (reg 6 write clears bits, reg 7 write sets
+     * bits) and a 2-byte write FIFO that drains one byte per
+     * MFM_BYTE_CYCLES while write+action are set.  Only used for the
+     * write-ready handshake bits (V8 ROM SWIM clock calibration at
+     * $A71636 writes 21 bytes and waits on HSHK bit 7). */
+    uint8_t ism_modereg;
+    int ism_wfifo;
+    int ism_wfifo_cyc;
+    int ism_wfifo_prev_rem;
     uint8_t ism_phase;      /* ISM phase register */
     int ism_switch_state;   /* State machine for IWM->ISM mode switch */
     uint8_t ism_last_mode_write; /* Last mode reg value (for ISM switch detection) */
+    uint8_t v8_bit6_hist;   /* V8: bit 6 of the last IWM mode writes (1,0,1,1 -> ISM) */
 
     int track;              /* Current track (0-79) */
     int side;               /* Current side (0-1) */
@@ -442,7 +453,68 @@ static void update_byte_clock(void)
     }
 }
 
+/* Drain the write FIFO by elapsed CPU cycles (write+action mode only). */
+static void ism_wfifo_update(void)
+{
+    int rem = m68k_cycles_remaining();
+    int elapsed = (iwm.ism_wfifo_prev_rem > rem) ? iwm.ism_wfifo_prev_rem - rem
+                                                 : MFM_BYTE_CYCLES; /* new slice */
+    iwm.ism_wfifo_prev_rem = rem;
+    if ((iwm.ism_modereg & 0x18) != 0x18) { iwm.ism_wfifo_cyc = 0; return; }
+    iwm.ism_wfifo_cyc += elapsed;
+    while (iwm.ism_wfifo > 0 && iwm.ism_wfifo_cyc >= MFM_BYTE_CYCLES) {
+        iwm.ism_wfifo_cyc -= MFM_BYTE_CYCLES;
+        iwm.ism_wfifo--;
+    }
+    if (iwm.ism_wfifo == 0) iwm.ism_wfifo_cyc = 0;
+}
+
 /* ISM mode read handler — only called for read-bank (A12=1, raw_reg >= 8) */
+#if MAC_ROM_LC_II
+/* V8 (LC II) SWIM drive select.  The image is the internal drive 1; drive 2
+ * (external) must read as empty or the .Sony driver posts a disk-inserted
+ * event for it and the Finder offers to initialize it.
+ *   IWM mode: SELECT line (regs 10/11: $1400 = drive 1, $1600 = drive 2).
+ *   ISM mode: mode register bit 1 = drive 1 enable, bit 2 = drive 2 enable. */
+static inline bool v8_drive2_selected(void)
+{
+    if (iwm.ism_mode) return (iwm.ism_modereg & 0x06) == 0x04;
+    return (iwm.lines & IWM_SELECT) != 0;
+}
+
+/* Drive status sense line (Apple 3.5" drive register file, as in MAME's
+ * mac_floppy_device): reg = CA0 | CA1<<1 | CA2<<2 | SEL<<3, where CA0-2
+ * come from the IWM lines (IWM mode) or the ISM phase register (ISM mode)
+ * and SEL is VIA1 port A bit 5.  The V8 .Sony reads it as IWM status
+ * bit 7 ($A6D450) or ISM handshake bit 3 ($A6ED12).  Returns 0/1. */
+static uint8_t v8_sense(void)
+{
+    if (v8_drive2_selected()) return 1;      /* no external drive: all high */
+    int reg = (iwm.ism_mode ? iwm.ism_phase : iwm.lines) & 0x07;
+    if (via_get_ora() & 0x20) reg |= 8;
+    bool disk = iwm.disk_inserted;
+    switch (reg) {
+    case 0x1: return 1;                      /* /STEP: not stepping */
+    case 0x3: return 0;                      /* DISK SWITCHED (active high, MAME
+                                              * !dskchg): no.  Returning 1 made the
+                                              * .Sony VBL task ($A6D876) post a
+                                              * diskEvt every 30 ticks until the
+                                              * queue filled and the boot floppy
+                                              * got _Eject'ed (~F3650). */
+    case 0x5: return 1;                      /* SuperDrive: yes */
+    case 0x6: return 1;                      /* double-sided: yes */
+    case 0x7: return 0;                      /* /DRIVE INSTALLED: yes */
+    case 0x8: return disk ? 0 : 1;           /* /DISK IN PLACE */
+    case 0x9: return disk ? 0 : 1;           /* /WRITE PROTECT: image is read-only */
+    case 0xA: return iwm.track == 0 ? 0 : 1; /* /TRACK 0 */
+    case 0xD: return 1;                      /* MFM mode */
+    case 0xE: return disk ? 0 : 1;           /* /READY */
+    case 0xF: return disk ? 0 : 1;           /* /HD media (1.44MB) */
+    default:  return 0;                      /* dir, motor on, index/tach, rddata */
+    }
+}
+#endif
+
 static uint8_t ism_read(int reg)
 {
     uint8_t val = 0;
@@ -535,7 +607,8 @@ static uint8_t ism_read(int reg)
              * read at $435196 always takes the IWM/GCR path which can't
              * read MFM disks.  Set $17D here when PHASE reads back F7
              * (final handshake step) to emulate what $435A88 would do. */
-            if (val == 0xF7) {
+            /* Classic ROM DiskVars offsets only (V8 layout differs) */
+            if (val == 0xF7 && !MAC_ROM_LC_II) {
                 uint8_t *ram = mac_mem_get_ram();
                 if (ram) {
                     uint32_t dv_ptr = ((uint32_t)ram[0x134]<<24)|
@@ -626,6 +699,12 @@ static uint8_t ism_read(int reg)
         if (iwm.read_active && iwm.disk_inserted && iwm.rddata_ready) {
             val |= ISM_HSHK_RDDATA;
         }
+        /* Write mode + action: bit 7 = FIFO has room, bit 6 = FIFO empty */
+        if ((iwm.ism_modereg & 0x18) == 0x18) {
+            ism_wfifo_update();
+            if (iwm.ism_wfifo < 2) val |= 0x80;
+            if (iwm.ism_wfifo == 0) val |= 0x40;
+        }
         if (iwm.disk_inserted) {
             val |= ISM_HSHK_MOTORON;
             /* SENSE/FDHD (bit 5): on SuperDrive, LOW = HD media detected,
@@ -657,6 +736,9 @@ static uint8_t ism_read(int reg)
         if (iwm.index_pulse_countdown > 0) {
             val |= 0x04;
         }
+#if MAC_ROM_LC_II
+        val = (uint8_t)((val & ~0x08) | (v8_sense() ? 0x08 : 0));  /* bit 3 = sense */
+#endif
         /* Log HANDSHAKE reads when ISM not actively reading.
          * This captures the init path's BSR $435198 check which
          * happens inside a 1000-cycle slice (invisible to PC trace). */
@@ -741,9 +823,35 @@ static uint8_t ism_read(int reg)
 /* ISM mode write handler */
 static void ism_write(int reg, uint8_t value)
 {
+    /* Shadow of the real set/clear mode register (see ism_modereg) */
+    if (reg == ISM_MODE0 || reg == ISM_HANDSHAKE) {
+        ism_wfifo_update();
+        if (reg == ISM_MODE0) iwm.ism_modereg &= (uint8_t)~value;
+        else                  iwm.ism_modereg |= value;
+        if (iwm.ism_modereg & 0x01) { iwm.ism_wfifo = 0; iwm.ism_wfifo_cyc = 0; }
+#if MAC_ROM_LC_II
+        /* Real SWIM: clearing mode bit 6 (write to reg 6 with bit 6 set)
+         * returns the chip to IWM mode.  The V8 .Sony probes ISM, then
+         * writes $F8/$80 to reg 6 and talks IWM for drive select/sense. */
+        if (reg == ISM_MODE0 && (value & 0x40)) {
+            static int sw_log = 0;
+            if (sw_log++ < 4) ESP_LOGI(TAG, "V8 SWIM ISM -> IWM (mode clr %02X)", value);
+            iwm.ism_mode = false;
+            iwm.read_active = false;
+            iwm.ism_modereg = 0;
+            iwm.v8_bit6_hist = 0;
+            return;
+        }
+#endif
+    }
+
     switch (reg) {
     case ISM_DATA:
-        /* Write data register (for disk writes - not implemented) */
+        /* Disk writes are not implemented; only model FIFO occupancy */
+        if (iwm.ism_modereg & 0x10) {
+            ism_wfifo_update();
+            if (iwm.ism_wfifo < 2) iwm.ism_wfifo++;
+        }
         break;
 
     case ISM_MARK:
@@ -969,7 +1077,7 @@ void iwm_insert_disk(void)
          * to be accepted.
          * Byte +$03 should be 0 (idle) so the BEQ path at $4357E4
          * is taken (drives 4+ with +$03 > 0 hit a drive# >= 4 check). */
-        uint8_t *ram = mac_mem_get_ram();
+        uint8_t *ram = MAC_ROM_LC_II ? NULL : mac_mem_get_ram();  /* Classic DiskVars layout only */
         if (ram) {
             uint32_t dv_ptr = ((uint32_t)ram[0x134]<<24)|
                               ((uint32_t)ram[0x135]<<16)|
@@ -990,8 +1098,11 @@ void iwm_insert_disk(void)
     }
 }
 
+uint32_t v8_iwm_reads = 0;
+
 uint8_t iwm_read(uint32_t address)
 {
+    v8_iwm_reads++;
     int reg = (address >> 9) & 0xF;
 
     /* ISM mode: A2-A0 on SWIM (= bits 2-0 of IWM reg) select register.
@@ -1148,6 +1259,9 @@ uint8_t iwm_read(uint32_t address)
         if (iwm.lines & IWM_ENABLE) {
             status |= 0x20;
         }
+#if MAC_ROM_LC_II
+        if (v8_sense()) status |= 0x80;      /* bit 7 = drive sense line */
+#endif
         return status;
     }
 
@@ -1229,6 +1343,20 @@ void iwm_write(uint32_t address, uint8_t value)
     /* Q6=1, Q7=1: Write mode register */
     if ((iwm.lines & IWM_Q6) && (iwm.lines & IWM_Q7)) {
         iwm.mode = value;
+#if MAC_ROM_LC_II
+        /* SWIM: writing mode bit 6 as 1,0,1,1 switches to ISM mode
+         * (LC II ROM $A6EAA6 writes $57,$17,$57,$57). */
+        iwm.v8_bit6_hist = (uint8_t)((iwm.v8_bit6_hist << 1) | ((value >> 6) & 1)) & 0x0F;
+        if (iwm.v8_bit6_hist == 0x0B) {
+            iwm.ism_mode = true;
+            iwm.ism_modereg = 0x40;
+            iwm.ism_setup = ISM_SETUP_GCRMFM | ISM_SETUP_CLKSPD;
+            iwm.v8_bit6_hist = 0;
+            static int sw_log = 0;
+            if (sw_log++ < 4) ESP_LOGI(TAG, "V8 SWIM IWM -> ISM");
+        }
+        return;
+#endif
 
         /* SWIM ISM mode switch detection:
          * The ROM writes an alternating 0x17/0x57 pattern (toggling bit 6)

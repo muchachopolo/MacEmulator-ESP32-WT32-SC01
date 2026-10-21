@@ -10,6 +10,8 @@
 #include "mac_scc.h"
 #include "mac_scsi.h"
 #include "mac_iwm.h"
+#include "mac_v8video.h"
+#include "mac_v8disk.h"
 #include "m68k.h"
 
 #include <string.h>
@@ -29,12 +31,113 @@ static uint32_t rom_mask = 0;       /* For mirroring: rom_size - 1 */
 static uint32_t ram_mask = 0;       /* For mirroring: ram_size - 1 */
 
 
+/* ESP32 A/B switch (default 0): put the data-access callbacks
+ * m68k_read/write_memory_8/16/32 in IRAM like the fetch callbacks below.
+ * With M68K_INLINE_RAM they only serve ROM data, devices, low-memory writes
+ * and alias/edge cases; ~2KB of IRAM. */
+#ifndef MAC_MEM_CALLBACK_IRAM
+#define MAC_MEM_CALLBACK_IRAM 0
+#endif
+#if MAC_MEM_CALLBACK_IRAM
+#define MEM_CB_ATTR IRAM_ATTR
+#else
+#define MEM_CB_ATTR
+#endif
+
 /* Boot bypass flag — set by mac_emulator.c when disk is ready */
 volatile bool mac_boot_read_bypass = false;
 
 /* Post-boot mode — set after Finder is running. Enables lean instruction
  * fetch path that skips diagnostic watchpoints and logging intercepts. */
 bool mac_post_boot = false;
+
+/* Inline RAM fast-path limits read by Musashi (m68kconf.h M68K_INLINE_RAM /
+ * M68K_INLINE_FETCH). 0 = disabled: every access takes the callbacks below.
+ * Each callback's own RAM fast path arms its limit (idempotent store) the
+ * first time it runs with its preconditions met (overlay off; post-boot for
+ * fetches). Bounds stop 3 bytes short of ram_size so a 32-bit access never
+ * crosses the end (the callbacks keep the Classic alias-wrap handling), and
+ * writes below $0A20 always take the callback (boot-time guards). With
+ * MAC_DIAG the limits stay 0 so every diagnostic still sees every access. */
+unsigned char *mac_fast_ram;
+unsigned int   mac_fast_rd_lim;
+unsigned int   mac_fast_wr_span;
+unsigned int   mac_fast_fetch_lim;
+#if MAC_DIAG
+#define ARM_FAST_RD()    do { } while (0)
+#define ARM_FAST_WR()    do { } while (0)
+#define ARM_FAST_FETCH() do { } while (0)
+#else
+#define ARM_FAST_RD()    (mac_fast_rd_lim = ram_size - 3)
+#define ARM_FAST_WR()    (mac_fast_wr_span = ram_size - 3 - 0x0A20)
+#define ARM_FAST_FETCH() (mac_fast_fetch_lim = ram_size - 3)
+#endif
+
+#if MAC_ROM_LC_II
+/* VRAM fast path: $F40000-$FBFFFF straight to the V8 VRAM buffer (PSRAM).
+ * Checked only AFTER the RAM/ROM fast paths so their cost is unchanged.
+ * (address - base) < size is one unsigned compare. */
+static uint8_t *v8_vram;
+/* Native-LCD declaration-ROM copy (byte reads only, see mac_v8video.c) */
+static const uint8_t *v8_decl;
+static uint32_t v8_decl_off = 0xFFFFFFFF;
+#ifndef V8_NO_VRAM_FASTPATH
+#define VRAM_HIT(a, n)  ((uint32_t)((a) - V8_VRAM_BASE) <= (uint32_t)(V8_VRAM_SIZE - (n)))
+#else
+#define VRAM_HIT(a, n)  0   /* A/B benchmarking only */
+#endif
+uint32_t v8_fetch_ring[256];
+int v8_fetch_idx;
+#endif
+
+/* ROM-variant address table. The LC II ROM is the same OS source compiled
+ * for 68020: every routine is a structural clone of the Classic ROM's at a
+ * different address. Intercepts are pinned per-ROM. */
+#if MAC_ROM_LC_II
+#define BOOT_READ_HELPER 0x401616   /* boot block _Read helper (sig check $4C4B) */
+#define DM_READ_ENTRY    0x40BB24   /* DM _Read handler entry */
+#define DM_SPIN_LOOP     0x40BB8C   /* DM _Read ioResult>0 polling loop */
+#define DM_CTL_ENTRY     0x40BBAE   /* DM _Control handler entry */
+#define DM_STAT_ENTRY    0x40BBBE   /* DM _Status handler entry */
+#else
+#define BOOT_READ_HELPER 0x400E0A
+#define DM_READ_ENTRY    0x40315C
+#define DM_SPIN_LOOP     0x4031BE
+#define DM_CTL_ENTRY     0x4031E0
+#define DM_STAT_ENTRY    0x4031EE
+#endif
+
+#if !MAC_ROM_LC_II && CLASSIC_NATIVE_LCD
+/* Classic native 480x320 ROM patches (CLASSIC_NATIVE_LCD, see mac_emulator.h).
+ * Each entry is the immediate word of a MOVE.W #imm (ROM file offsets):
+ *   $005F6 InitCrsr globals: MOVE.W #342,(A0)+ / MOVE.W #512,(A0) -> CrsrPin
+ *          ($0834) botRight.         imm words at $0060A / $0060E
+ *   $18F94 ScrnSize (JScrnSize $0810): MOVE.W #342,(A0) / MOVE.W #512,(A0)
+ *                                     imm words at $18F9A / $18FA0
+ *   $18FA4 _ScrnBitMap (called by InitGraf for screenBits): baseAddr =
+ *          ScrnBase, rowBytes = ScreenRow, bounds 0,0,#342 then BRA into
+ *          ScrnSize's #512.          imm word  at $18FB4
+ * rowBytes (ScreenRow $0106 = 64) and ScrnBase are unchanged. */
+#define CL_NAT_LO  0x18F9A   /* lean-path window [$18F9A, $18FB4] */
+#define CL_NAT_SPAN (0x18FB4 - 0x18F9A)
+static inline uint16_t classic_native_word(uint32_t off, uint16_t w)
+{
+    switch (off) {
+    case 0x0060A: case 0x18F9A: case 0x18FB4: return 0x0140;   /* 320 */
+    case 0x0060E: case 0x18FA0:               return 0x01E0;   /* 480 */
+    }
+    return w;
+}
+#define CLASSIC_NATIVE_PATCH(off, w) \
+    do { if (__builtin_expect((uint32_t)((off) - CL_NAT_LO) <= CL_NAT_SPAN || (off) < 0x610, 0)) \
+             (w) = classic_native_word((off), (w)); } while (0)
+#define CLASSIC_NATIVE_PATCH_LEAN(off, w) \
+    do { if (__builtin_expect((uint32_t)((off) - CL_NAT_LO) <= CL_NAT_SPAN, 0)) \
+             (w) = classic_native_word((off), (w)); } while (0)
+#else
+#define CLASSIC_NATIVE_PATCH(off, w)      do { } while (0)
+#define CLASSIC_NATIVE_PATCH_LEAN(off, w) do { } while (0)
+#endif
 
 /* Byte-read helpers for big-endian data */
 #define READ_BYTE(base, addr)   ((base)[addr])
@@ -79,6 +182,8 @@ bool mac_mem_init(const uint8_t *rom_data, uint32_t rom_sz,
         ESP_LOGW(TAG, "Reduced RAM to 1MB");
     }
 
+    mac_fast_ram = ram;
+
     ESP_LOGI(TAG, "Memory initialized: %luKB RAM (PSRAM), %luKB ROM (flash)",
              (unsigned long)(ram_size / 1024), (unsigned long)(rom_size / 1024));
 
@@ -87,6 +192,11 @@ bool mac_mem_init(const uint8_t *rom_data, uint32_t rom_sz,
     scc_init();
     scsi_init();
     iwm_init(disk_data, disk_size);
+#if MAC_ROM_LC_II
+    if (!v8video_init()) return false;
+    v8_vram = v8video_get_vram();
+    v8_decl_off = v8video_patch_rom(rom, rom_size, &v8_decl);
+#endif
 
     return true;
 }
@@ -115,6 +225,93 @@ static inline uint8_t mem_read_byte(uint32_t address)
     /* Mask to 24-bit address bus */
     address &= 0x00FFFFFF;
 
+#if MAC_ROM_LC_II
+#if MAC_DIAG
+    static uint32_t spin_addr, spin_pc, spin_rep;
+    static int spin_logged;
+    if (address == spin_addr) {
+        uint32_t pcv = m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF;
+        if (pcv == spin_pc) {
+            if (spin_rep++ == 3000 && spin_logged < 8) {
+                ESP_LOGW(TAG, "V8SPIN #%d: addr=$%06X PC=$%06X",
+                         spin_logged++, address, pcv);
+            }
+        } else {
+            spin_pc = pcv;
+            spin_rep = 0;
+        }
+    } else {
+        spin_addr = address;
+        spin_pc = 0;
+        spin_rep = 0;
+    }
+    static int v8trace = 0;
+    if (v8trace < 60 &&
+        ((address < 0x40 && via_get_overlay()) ||
+         (address >= 0x5FFFD2 && address < 0x5FFFF2))) {
+        ESP_LOGW(TAG, "V8BOOT #%d: $%06X -> %02X PC=$%06X ov=%d",
+                 v8trace++, address,
+                 (address >= 0x5FFFD2) ? rom[0x0FFD2 + (address - 0x5FFFD2)]
+                                       : rom[address & rom_mask],
+                 m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF,
+                 via_get_overlay());
+    }
+#endif /* MAC_DIAG */
+    /* V8 (Color Classic / LC II): ROM $40A00000-$40AFFFFF aliases to the
+     * $A00000-$AFFFFF 24-bit window (A24-A30 undecoded); RAM $0-$9FFFFF;
+     * devices overlay RAM inside their windows. Overlay mirrors ROM at
+     * $0-$7FFFF only — RAM never moves to $600000 on V8. */
+    if (via_get_overlay()) {
+        if (address < 0x400 && via_get_overlay_was_off()) {
+            return ram[address];
+        }
+        if (address < 0x80000) {
+            return rom[address & rom_mask];
+        }
+    }
+    if (address >= 0xA00000 && address < 0xB00000) {
+        if (via_overlay_fast) {
+            ESP_LOGI(TAG, "V8 overlay cleared by ROM access $%06X PC=$%06X", address,
+                     m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF);
+            via_clear_overlay();
+        }
+        uint32_t ro = address & rom_mask;
+        if (ro >= v8_decl_off) return v8_decl[ro - v8_decl_off];
+        return rom[ro];
+    }
+    /* Device bases from the ROM's own decoder table (file $3490):
+     * VIA1 $50F00000, SWIM $50F16000; $50FC0000 is the diag-ROM probe. */
+    if (address >= 0xF00000 && address < 0xF02000) {
+        return via_read(address);
+    }
+    if (address >= 0xF16000 && address < 0xF18000) {
+        return iwm_read(address);
+    }
+    /* SCC $50F04000 (same A1=channel, A2=data decode as the Classic) and
+     * NCR 5380 SCSI $50F10000 regs (A6-A4 = register) + $50F12000 pDMA. */
+    if (address >= 0xF04000 && address < 0xF06000) {
+        return scc_read(address);
+    }
+    if (address >= 0xF10000 && address < 0xF14000) {
+        return scsi_read(address);
+    }
+    /* VDAC $F24000, pseudo-VIA2 $F26000, VRAM $F40000-$FBFFFF */
+    if (address >= 0xF24000 && address < 0xFC0000 &&
+        (address >= V8_VRAM_BASE || address < 0xF28000)) {
+        return v8video_read(address);
+    }
+    /* V8 RAM does not alias: $ram_size-$9FFFFF is unpopulated (open bus),
+     * so the ROM's sizer at $AA01D8 finds exactly ram_size bytes. */
+    if (address < ram_size) {
+        return ram[address];
+    }
+    /* --- v8disk hook: .Sony Prime stub + trigger (mac_v8disk.c) --- */
+    if (address >= V8DISK_BASE && address < V8DISK_END) {
+        return v8disk_read(address);
+    }
+    /* --- end v8disk hook --- */
+    return 0xFF;
+#else
     if (via_get_overlay()) {
         /* Overlay mode: ROM at 0x000000, RAM at 0x600000.
          * Exception: once first-stage boot has turned overlay OFF (copying
@@ -144,6 +341,7 @@ static inline uint8_t mem_read_byte(uint32_t address)
             return rom[address & rom_mask];
         }
     }
+#endif
 
     /* SCSI NCR 5380: 0x580000-0x5FFFFF */
     if (address >= 0x580000 && address < 0x600000) {
@@ -211,6 +409,7 @@ static inline void mem_write_byte(uint32_t address, uint8_t value)
         return;  /* Block the write — preserve safe handler */
     }
 
+#if MAC_DIAG
     /* LOG: Monitor BootDrive ($0210-$0211) writes.
      * Previously guarded, but blocking may prevent ptch resources from
      * completing.  Now just logging. */
@@ -357,6 +556,7 @@ static inline void mem_write_byte(uint32_t address, uint8_t value)
         }
     }
 
+#endif /* MAC_DIAG */
     /* Drive queue guard: ROM at $402B26 zeroes DrvQHdr ($0308-$0311)
      * before every boot block execution.  Catch the last byte ($0311)
      * and immediately re-install qHead/qTail -> $000046.
@@ -379,6 +579,46 @@ static inline void mem_write_byte(uint32_t address, uint8_t value)
         }
     }
 
+#if MAC_ROM_LC_II
+    /* V8 writes: ROM window $A00000-$AFFFFF is read-only on the bus. */
+    if (address >= 0xA00000 && address < 0xC00000) {
+        return;
+    }
+    if (address >= 0xF00000 && address < 0xF02000) {
+        via_write(address, value);
+        return;
+    }
+    if (address >= 0xF16000 && address < 0xF18000) {
+        iwm_write(address, value);
+        return;
+    }
+    if (address >= 0xF04000 && address < 0xF06000) {
+        scc_write(address, value);
+        return;
+    }
+    if (address >= 0xF10000 && address < 0xF14000) {
+        scsi_write(address, value);
+        return;
+    }
+    if (address >= 0xF24000 && address < 0xFC0000 &&
+        (address >= V8_VRAM_BASE || address < 0xF28000)) {
+        v8video_write(address, value);
+        return;
+    }
+#if MAC_DIAG
+    static int v8w = 0;
+    if (v8w < 10 && (address == 0x2002A0 || address == 0x1002F8 ||
+                     (address >= 0x1FFAC0 && address <= 0x1FFAF0))) {
+        ESP_LOGW(TAG, "V8WTEST #%d: $%06X<-%02X PC=$%06X",
+                 v8w++, address, value,
+                 m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF);
+    }
+#endif /* MAC_DIAG */
+    if (address < ram_size) {
+        ram[address] = value;
+    }
+    return;
+#else
     if (via_get_overlay()) {
         /* Overlay mode: ROM at 0x000000 for READS, but writes always go to RAM
          * (ROM is physically read-only — overlay only controls the ROM chip
@@ -437,6 +677,7 @@ static inline void mem_write_byte(uint32_t address, uint8_t value)
         via_write(address, value);
         return;
     }
+#endif
 
     /* Writes to unmapped space are silently ignored */
 }
@@ -445,14 +686,24 @@ static inline void mem_write_byte(uint32_t address, uint8_t value)
 /* =================== MUSASHI REQUIRED CALLBACKS ======================= */
 /* ====================================================================== */
 
-unsigned int m68k_read_memory_8(unsigned int address)
+MEM_CB_ATTR unsigned int m68k_read_memory_8(unsigned int address)
 {
     /* Fast path: normal mode RAM read (most common case).
      * Alias via ram_mask — matches real Mac hardware behavior. */
     address &= 0x00FFFFFF;
-    if (__builtin_expect(!via_overlay_fast && address < 0x400000, 1)) {
+#if MAC_ROM_LC_II
+    if (__builtin_expect(!via_overlay_fast &&
+        (address < ram_size), 1)) {
+        ARM_FAST_RD();
         return ram[address & ram_mask];
     }
+    if (VRAM_HIT(address, 1)) return v8_vram[address - V8_VRAM_BASE];
+#else
+    if (__builtin_expect(!via_overlay_fast && address < 0x400000, 1)) {
+        ARM_FAST_RD();
+        return ram[address & ram_mask];
+    }
+#endif
     return mem_read_byte(address);
 }
 
@@ -504,7 +755,7 @@ static uint16_t read16_dm_spin_rescue(void)
             }
         }
     }
-    return rom_word_at(0x4031BE);
+    return rom_word_at(DM_SPIN_LOOP);
 }
 
 /* Intercept Device Manager _Read handler at $40315C.
@@ -549,7 +800,7 @@ static uint16_t read16_dm_read(void)
             return 0x4E75;  /* RTS */
         }
     }
-    return rom_word_at(0x40315C);
+    return rom_word_at(DM_READ_ENTRY);
 }
 
 /* Intercept Device Manager _Control handler at $4031E0.
@@ -576,7 +827,7 @@ static uint16_t read16_dm_ctl(void)
             return 0x4E75;  /* RTS */
         }
     }
-    return rom_word_at(0x4031E0);
+    return rom_word_at(DM_CTL_ENTRY);
 }
 
 /* Intercept Device Manager _Status handler at $4031EE.
@@ -613,7 +864,7 @@ static uint16_t read16_dm_stat(void)
             return 0x4E75;  /* RTS */
         }
     }
-    return rom_word_at(0x4031EE);
+    return rom_word_at(DM_STAT_ENTRY);
 }
 
 /* Patch PB at sub6 entry ($400DF4): set ioRefNum = -5 (.SONY).
@@ -683,7 +934,7 @@ static uint16_t read16_read_trap(void)
         }
         trap_count++;
     }
-    return rom_word_at(0x400E0A);
+    return rom_word_at(BOOT_READ_HELPER);
 }
 
 /* .SONY driver Prime intercept ($434B76): Device Manager calls
@@ -792,9 +1043,103 @@ static uint16_t read16_sony(void)
     return rom_word_at(0x434BAC);
 }
 
-unsigned int m68k_read_memory_16(unsigned int address)
+MEM_CB_ATTR unsigned int m68k_read_memory_16(unsigned int address)
 {
     address &= 0x00FFFFFF;
+#if MAC_ROM_LC_II
+#if MAC_DIAG
+    uint32_t v8_prev_fetch = v8_fetch_ring[(v8_fetch_idx - 1) & 255];
+    v8_fetch_ring[v8_fetch_idx & 255] = address;
+    v8_fetch_idx++;
+    static int v8_zrun = 0;
+    static bool v8_zw_done = false;
+    if (!v8_zw_done && address >= 0x400000 && address < 0x5FFFD2) {
+        uint32_t ra = address & ram_mask;
+        if ((ram[ra] | ram[ra + 1]) != 0) {
+            v8_zrun = 0;
+        } else if (address == v8_prev_fetch + 2) {
+            if (++v8_zrun == 6) {
+                v8_zw_done = true;
+                ESP_LOGW(TAG, "V8ZW: zero-walk at $%06X prev=$%06X PC=$%06X ring:",
+                         address, v8_prev_fetch,
+                         m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF);
+                for (int ri = 24; ri >= 9; ri -= 8) {
+                    int base = (v8_fetch_idx - ri) & 255;
+                    ESP_LOGW(TAG, "  %06X %06X %06X %06X %06X %06X %06X %06X",
+                             v8_fetch_ring[base], v8_fetch_ring[(base+1)&255],
+                             v8_fetch_ring[(base+2)&255], v8_fetch_ring[(base+3)&255],
+                             v8_fetch_ring[(base+4)&255], v8_fetch_ring[(base+5)&255],
+                             v8_fetch_ring[(base+6)&255], v8_fetch_ring[(base+7)&255]);
+                }
+            }
+        }
+    }
+    static int v8sm = 0;
+    if (0 && v8sm < 400 && address >= 0x5FFFD2 && address < 0x610000) {
+        if (v8sm == 0) {
+            uint32_t sp0 = m68k_get_reg(NULL, M68K_REG_SP) & 0xFFFFFF;
+            ESP_LOGW(TAG, "V8SM0 SP=$%06X stack SP-32..SP+32:", sp0);
+            for (int si = 0; si < 64; si += 16) {
+                uint32_t sa = (sp0 - 32 + si) & ram_mask;
+                ESP_LOGW(TAG, "  $%06X %08X %08X %08X %08X", sa,
+                         (ram[sa] << 24) | (ram[sa + 1] << 16) | (ram[sa + 2] << 8) | ram[sa + 3],
+                         (ram[sa + 4] << 24) | (ram[sa + 5] << 16) | (ram[sa + 6] << 8) | ram[sa + 7],
+                         (ram[sa + 8] << 24) | (ram[sa + 9] << 16) | (ram[sa + 10] << 8) | ram[sa + 11],
+                         (ram[sa + 12] << 24) | (ram[sa + 13] << 16) | (ram[sa + 14] << 8) | ram[sa + 15]);
+            }
+            ESP_LOGW(TAG, "V8SM-JUMP ring before walk:");
+            for (int ri = 24; ri >= 1; ri -= 8) {
+                int base = ((v8_fetch_idx - ri) & 255);
+                ESP_LOGW(TAG, "  %06X %06X %06X %06X %06X %06X %06X %06X",
+                         v8_fetch_ring[base], v8_fetch_ring[(base+1)&255],
+                         v8_fetch_ring[(base+2)&255], v8_fetch_ring[(base+3)&255],
+                         v8_fetch_ring[(base+4)&255], v8_fetch_ring[(base+5)&255],
+                         v8_fetch_ring[(base+6)&255], v8_fetch_ring[(base+7)&255]);
+            }
+        }
+        uint32_t ra = address & ram_mask;
+        ESP_LOGW(TAG, "V8SM #%d: $%06X w=%04X PC=$%06X", v8sm++, address,
+                 (address >= 0x5FFFD2 && address < 0x610000)
+                     ? (rom[0x0FFD2 + (address - 0x5FFFD2)] << 8) | rom[0x0FFD3 + (address - 0x5FFFD2)]
+                     : (ram[ra] << 8) | ram[ra + 1],
+                 m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF);
+    }
+    static bool v8_exit_done = false;
+    if (!v8_exit_done && v8sm > 0 &&
+        !((address >= 0x5FFFD2 && address < 0x610000)) &&
+        ((v8_prev_fetch >= 0x5FFFD2 && v8_prev_fetch < 0x610000))) {
+        v8_exit_done = true;
+        ESP_LOGW(TAG, "V8EXIT ring (flow left alias): SP=$%06X PC=$%06X",
+                 m68k_get_reg(NULL, M68K_REG_SP) & 0xFFFFFF,
+                 m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF);
+        uint32_t spx = m68k_get_reg(NULL, M68K_REG_SP) & 0xFFFFFF;
+        ESP_LOGW(TAG, "V8EXIT stack SP-32..SP+32 (SP=$%06X):", spx);
+        for (int si = 0; si < 64; si += 16) {
+            uint32_t sa = (spx - 32 + si) & ram_mask;
+            ESP_LOGW(TAG, "  $%06X %08X %08X %08X %08X", sa,
+                     (ram[sa] << 24) | (ram[sa + 1] << 16) | (ram[sa + 2] << 8) | ram[sa + 3],
+                     (ram[sa + 4] << 24) | (ram[sa + 5] << 16) | (ram[sa + 6] << 8) | ram[sa + 7],
+                     (ram[sa + 8] << 24) | (ram[sa + 9] << 16) | (ram[sa + 10] << 8) | ram[sa + 11],
+                     (ram[sa + 12] << 24) | (ram[sa + 13] << 16) | (ram[sa + 14] << 8) | ram[sa + 15]);
+        }
+        for (int ri = 24; ri >= 1; ri -= 8) {
+            int base = ((v8_fetch_idx - ri) & 255);
+            ESP_LOGW(TAG, "  %06X %06X %06X %06X %06X %06X %06X %06X",
+                     v8_fetch_ring[base], v8_fetch_ring[(base+1)&255],
+                     v8_fetch_ring[(base+2)&255], v8_fetch_ring[(base+3)&255],
+                     v8_fetch_ring[(base+4)&255], v8_fetch_ring[(base+5)&255],
+                     v8_fetch_ring[(base+6)&255], v8_fetch_ring[(base+7)&255]);
+        }
+    }
+    static int v8r100 = 0;
+    if (v8r100 < 40 && address >= 0x100000 && address < 0x100400) {
+        uint32_t ra = address & ram_mask;
+        ESP_LOGW(TAG, "V8R100 #%d: $%06X w=%04X PC=$%06X", v8r100++, address,
+                 (ram[ra] << 8) | ram[ra + 1],
+                 m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF);
+    }
+#endif /* MAC_DIAG */
+#endif
 
     /* ROM patches — Mini vMac approach (ROMEMDEV.c).
      *
@@ -811,39 +1156,20 @@ unsigned int m68k_read_memory_16(unsigned int address)
      *   $011E → $6002: BRA.S +2 (skip 3rd RAM test = JSR $1D3E)
      *
      * The first RAM test pass (from $1CC4/$1CDA/$1CEC → $26F0/$25F8/$2928)
-     * runs normally and handles sizing. Mini vMac lets it run. */
-    {
-        uint32_t rom_off = 0xFFFFFFFF;
-        if (address < 0x500000) {
-            if (via_overlay_fast || address >= 0x400000) {
-                rom_off = address & rom_mask;
-            }
-        }
-        /* ROM checksum skip: BRA.S +8 at $1C68 (Mini vMac) */
-        if (__builtin_expect(rom_off == 0x1C68, 0)) {
-            static int rc = 0;
-            if (rc++ < 3) ESP_LOGW(TAG, "ROM-PATCH: skip checksum @$%06X", address);
-            return 0x6008;  /* BRA.S +8 */
-        }
-        /* Skip 2nd destructive RAM test: BRA.S +2 at $0086 (Mini vMac) */
-        if (__builtin_expect(rom_off == 0x0086, 0)) {
-            static int rt2 = 0;
-            if (rt2++ < 3) ESP_LOGW(TAG, "ROM-PATCH: skip RAM test2 @$%06X", address);
-            return 0x6002;  /* BRA.S +2 */
-        }
-        /* Skip 3rd destructive RAM test: BRA.S +2 at $011E (Mini vMac) */
-        if (__builtin_expect(rom_off == 0x011E, 0)) {
-            static int rt3 = 0;
-            if (rt3++ < 3) ESP_LOGW(TAG, "ROM-PATCH: skip RAM test3 @$%06X", address);
-            return 0x6002;  /* BRA.S +2 */
-        }
-    }
+     * runs normally and handles sizing. Mini vMac lets it run.
+     * (Applied just below the RAM fast path.) */
 
     /* Fast path: normal mode RAM read — by far the most common case.
      * Skips all intercept checks for addresses below $400000.
      * Alias via ram_mask (power-of-2) so the ROM's sizing code
      * sees correct hardware-style aliasing at the RAM boundary. */
+#if MAC_ROM_LC_II
+    if (__builtin_expect(!via_overlay_fast &&
+        (address < ram_size), 1)) {
+#else
     if (__builtin_expect(!via_overlay_fast && address < 0x400000, 1)) {
+#endif
+#if !MAC_ROM_LC_II
         /* Fix system-patched _InitWindows at $B322: the System file's ptch
          * resource patches TB[$112] to $B322, but that address gets overwritten
          * by the resource map type list (heap corruption).
@@ -885,7 +1211,9 @@ unsigned int m68k_read_memory_16(unsigned int address)
             }
             iw_sys++;
         }
+#endif
         uint32_t ra = address & ram_mask;
+        ARM_FAST_RD();
         if (__builtin_expect(ra + 1 < ram_size, 1)) {
             return (ram[ra] << 8) | ram[ra + 1];
         }
@@ -893,15 +1221,52 @@ unsigned int m68k_read_memory_16(unsigned int address)
         return (ram[ra] << 8) | ram[(address + 1) & ram_mask];
     }
 
+    /* (Moved below the RAM fast path: it only matches ROM offsets, which
+     * that path never serves, so RAM data reads skip these compares.) */
+#if !MAC_ROM_LC_II
+    {
+        uint32_t rom_off = 0xFFFFFFFF;
+        if (address < 0x500000) {
+            if (via_overlay_fast || address >= 0x400000) {
+                rom_off = address & rom_mask;
+            }
+        }
+        /* ROM checksum skip: BRA.S +8 at $1C68 (Mini vMac) */
+        if (__builtin_expect(rom_off == 0x1C68, 0)) {
+            static int rc = 0;
+            if (rc++ < 3) ESP_LOGW(TAG, "ROM-PATCH: skip checksum @$%06X", address);
+            return 0x6008;  /* BRA.S +8 */
+        }
+        /* Skip 2nd destructive RAM test: BRA.S +2 at $0086 (Mini vMac) */
+        if (__builtin_expect(rom_off == 0x0086, 0)) {
+            static int rt2 = 0;
+            if (rt2++ < 3) ESP_LOGW(TAG, "ROM-PATCH: skip RAM test2 @$%06X", address);
+            return 0x6002;  /* BRA.S +2 */
+        }
+        /* Skip 3rd destructive RAM test: BRA.S +2 at $011E (Mini vMac) */
+        if (__builtin_expect(rom_off == 0x011E, 0)) {
+            static int rt3 = 0;
+            if (rt3++ < 3) ESP_LOGW(TAG, "ROM-PATCH: skip RAM test3 @$%06X", address);
+            return 0x6002;  /* BRA.S +2 */
+        }
+    }
+#endif
+
     /* Normal mode ROM read ($400000-$4FFFFF).
      * Check intercepts only for specific addresses via if-chain.
      * For the vast majority of ROM reads (instruction fetches), no
      * intercept matches and we return ROM data directly.
      * The old approach checked all intercepts on every 16-bit read;
      * this limits intercept checks to ROM-range reads only. */
+#if MAC_ROM_LC_II
+    if (__builtin_expect(!via_overlay_fast && address >= 0xA00000 && address < 0xB00000, 1)) {
+#else
     if (__builtin_expect(!via_overlay_fast && address >= 0x400000 && address < 0x500000, 1)) {
+#endif
         if (__builtin_expect(mac_boot_read_bypass, 0)) {
+#if !MAC_ROM_LC_II
             if (address == 0x400CAC) return 0x4E71; /* BEQ→NOP */
+#endif
 
             /* CRITICAL FIX: Patch UNIMP trap handler to return safely.
              * The ROM's handler at $400768 does MOVEQ #12,D0; BRA $40138A
@@ -911,19 +1276,27 @@ unsigned int m68k_read_memory_16(unsigned int address)
              *   SUBA.L A0,A0  ; A0 = NULL (safe handle)
              *   MOVEQ  #0,D0  ; no error
              *   RTS            ; return to caller */
+#if !MAC_ROM_LC_II
             if (address == 0x400768) return 0x91C8;  /* SUBA.L A0,A0 */
             if (address == 0x40076A) return 0x7000;  /* MOVEQ #0, D0 */
             if (address == 0x40076C) return 0x4E75;  /* RTS */
+#endif
 
-            if (address == 0x40315C) return read16_dm_read();
-            if (address == 0x4031BE) return read16_dm_spin_rescue();
-            if (address == 0x4031E0) return read16_dm_ctl();
-            if (address == 0x4031EE) return read16_dm_stat();
+#if !MAC_ROM_LC_II
+            if (address == DM_READ_ENTRY) return read16_dm_read();
+            if (address == DM_SPIN_LOOP) return read16_dm_spin_rescue();
+            if (address == DM_CTL_ENTRY) return read16_dm_ctl();
+            if (address == DM_STAT_ENTRY) return read16_dm_stat();
             if (address == 0x400DF4) read16_sub6_patch();  /* patches PB, falls through */
-            if (address == 0x400E0A) return read16_read_trap();
+            if (address == BOOT_READ_HELPER) return read16_read_trap();
+#endif
+#if !MAC_ROM_LC_II
             if (address == 0x434B76) return read16_prime();
             if (address == 0x434BAC) return read16_sony();
+#endif
 
+#if !MAC_ROM_LC_II
+#if MAC_DIAG
             /* Detect _InitGraf entry ($412EDC = TB[$06E] ROM handler). */
             if (address == 0x412EDC) {
                 static int ig_cnt = 0;
@@ -983,8 +1356,10 @@ unsigned int m68k_read_memory_16(unsigned int address)
                 }
                 gne_cnt++;
             }
+#endif /* MAC_DIAG */
             /* (Line-A trap logger removed — exception frame reading was unreliable) */
 
+#if MAC_DIAG
             /* Detect _Launch entry ($4099A2 = TB[$1F2] ROM handler).
              * If this is ever fetched as an instruction, _Launch was called. */
             if (address == 0x4099A2) {
@@ -1019,8 +1394,11 @@ unsigned int m68k_read_memory_16(unsigned int address)
                     launch_cnt++;
                 }
             }
+#endif /* MAC_DIAG */
+#endif
         }
 
+#if MAC_DIAG
         /* Detect UNIMPLEMENTED trap handler entry ($400768).
          * When an A-trap dispatches to $400768, this means the trap is
          * not installed.  Log the trap word (at return_addr-2 on stack)
@@ -1056,21 +1434,36 @@ unsigned int m68k_read_memory_16(unsigned int address)
             }
         }
 
+#endif /* MAC_DIAG */
         /* Non-intercepted ROM read — return data directly */
         uint32_t a = address & rom_mask;
-        return (rom[a] << 8) | rom[a + 1];
+        uint16_t w = (rom[a] << 8) | rom[a + 1];
+        CLASSIC_NATIVE_PATCH(a, w);
+        return w;
     }
 
+#if MAC_ROM_LC_II
+    if (VRAM_HIT(address, 2)) {
+        const uint8_t *v = v8_vram + (address - V8_VRAM_BASE);
+        return (v[0] << 8) | v[1];
+    }
+#endif
     /* Slow path: overlay mode, peripherals, exception handler logging */
     return (mem_read_byte(address) << 8) | mem_read_byte(address + 1);
 }
 
-unsigned int m68k_read_memory_32(unsigned int address)
+MEM_CB_ATTR unsigned int m68k_read_memory_32(unsigned int address)
 {
     address &= 0x00FFFFFF;
     /* Fast path: normal mode RAM read — alias via ram_mask */
+#if MAC_ROM_LC_II
+    if (__builtin_expect(!via_overlay_fast &&
+        (address < ram_size), 1)) {
+#else
     if (__builtin_expect(!via_overlay_fast && address < 0x400000, 1)) {
+#endif
         uint32_t ra = address & ram_mask;
+        ARM_FAST_RD();
         if (__builtin_expect(ra + 3 < ram_size, 1)) {
             return ((uint32_t)ram[ra] << 24) | ((uint32_t)ram[ra+1] << 16) |
                    ((uint32_t)ram[ra+2] << 8) | ram[ra+3];
@@ -1082,25 +1475,84 @@ unsigned int m68k_read_memory_32(unsigned int address)
                ram[(address+3) & ram_mask];
     }
     /* Fast path: normal mode ROM read */
+#if MAC_ROM_LC_II
+    if (__builtin_expect(!via_overlay_fast && address >= 0xA00000 && address < 0xB00000, 1)) {
+#else
     if (__builtin_expect(!via_overlay_fast && address < 0x500000, 1)) {
+#endif
         uint32_t a = address & rom_mask;
         return ((uint32_t)rom[a] << 24) | ((uint32_t)rom[a+1] << 16) |
                ((uint32_t)rom[a+2] << 8) | rom[a+3];
     }
+#if MAC_ROM_LC_II
+    if (VRAM_HIT(address, 4)) {
+        const uint8_t *v = v8_vram + (address - V8_VRAM_BASE);
+        return ((uint32_t)v[0] << 24) | ((uint32_t)v[1] << 16) |
+               ((uint32_t)v[2] << 8) | v[3];
+    }
+#endif
     return (mem_read_byte(address) << 24) |
            (mem_read_byte(address + 1) << 16) |
            (mem_read_byte(address + 2) << 8) |
             mem_read_byte(address + 3);
 }
 
-void m68k_write_memory_8(unsigned int address, unsigned int value)
+MEM_CB_ATTR void m68k_write_memory_8(unsigned int address, unsigned int value)
 {
     /* Fast path: normal mode RAM write — alias via ram_mask.
      * Skip if address is in the watchpoint range and
      * mac_boot_read_bypass is active — those writes need guard checks. */
     address &= 0x00FFFFFF;
+#if MAC_ROM_LC_II
+#if MAC_DIAG
+    if (address >= 0x031C && address <= 0x031F) {
+        static int v8mt8_cnt = 0;
+        if (v8mt8_cnt < 6) {
+            ESP_LOGW(TAG, "V8MT8 #%d: $%04X<-%02X PC=$%06X",
+                     v8mt8_cnt++, address, value & 0xFF,
+                     m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF);
+        }
+    }
+    if (address >= 0x1FFAC0 && address <= 0x1FFAF0) {
+        static int v8cs8_cnt = 0;
+        if (v8cs8_cnt < 6) {
+            ESP_LOGW(TAG, "V8CS8 #%d: $%06X<-%02X PC=$%06X",
+                     v8cs8_cnt++, address, value & 0xFF,
+                     m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF);
+        }
+    }
+    if (address >= 0x360000 && address <= 0x36000F) {
+        static int v8cp8_cnt = 0;
+        if (v8cp8_cnt < 8) {
+            ESP_LOGW(TAG, "V8CPY8 #%d: $%06X<-%02X PC=$%06X",
+                     v8cp8_cnt++, address, value & 0xFF,
+                     m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF);
+        }
+    }
+    if (address >= 0x0FF9F0 && address <= 0x0FF9FF) {
+        static int v8stk8 = 0;
+        if (v8stk8 < 16) {
+            ESP_LOGW(TAG, "V8STK8 #%d: $%06X<-%02X PC=$%06X",
+                     v8stk8++, address, value & 0xFF,
+                     m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF);
+        }
+    }
+    if (address >= 0x100000 && address < 0x100010) {
+        static int v8c100_8 = 0;
+        if (v8c100_8 < 16) {
+            ESP_LOGW(TAG, "V8C100_8 #%d: $%06X<-%02X PC=$%06X",
+                     v8c100_8++, address, value & 0xFF,
+                     m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF);
+        }
+    }
+#endif /* MAC_DIAG */
+    if (__builtin_expect(!via_overlay_fast &&
+        (address < ram_size), 1)) {
+#else
     if (__builtin_expect(!via_overlay_fast && address < 0x400000, 1)) {
+#endif
         if (__builtin_expect(!mac_boot_read_bypass || address >= 0x0A20, 1)) {
+#if MAC_DIAG
             /* Catch 8-bit writes to SysZone allocPtr ($162E-$1631) — these
              * bypass mem_write_byte watchpoints because address >= $0A20. */
             if (__builtin_expect(mac_boot_read_bypass &&
@@ -1114,16 +1566,54 @@ void m68k_write_memory_8(unsigned int address, unsigned int value)
                     ap8_cnt++;
                 }
             }
+#endif /* MAC_DIAG */
+            ARM_FAST_WR();
             ram[address & ram_mask] = value & 0xFF;
             return;
         }
     }
+#if MAC_ROM_LC_II
+    if (VRAM_HIT(address, 1)) { v8_vram[address - V8_VRAM_BASE] = (uint8_t)value; return; }
+#endif
     mem_write_byte(address, value & 0xFF);
 }
 
-void m68k_write_memory_16(unsigned int address, unsigned int value)
+MEM_CB_ATTR void m68k_write_memory_16(unsigned int address, unsigned int value)
 {
     address &= 0x00FFFFFF;
+#if MAC_DIAG
+#if MAC_ROM_LC_II
+    if (address >= 0x4D4EE0 && address <= 0x4D4EEF) {
+        static int v8b = 0;
+        if (v8b < 12) {
+            ESP_LOGW(TAG, "V8CB16 #%d: $%06X<-%04X PC=$%06X", v8b++, address, value,
+                     m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF);
+        }
+    }
+    if (address >= 0x0FF9F0 && address <= 0x0FF9FF) {
+        static int v8stk16 = 0;
+        if (v8stk16 < 16) {
+            ESP_LOGW(TAG, "V8STK16 #%d: $%06X<-%04X PC=$%06X",
+                     v8stk16++, address, value,
+                     m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF);
+        }
+    }
+    if (address >= 0x100000 && address < 0x100010) {
+        static int v8c100_16 = 0;
+        if (v8c100_16 < 16) {
+            ESP_LOGW(TAG, "V8C100_16 #%d: $%06X<-%04X PC=$%06X",
+                     v8c100_16++, address, value,
+                     m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF);
+        }
+    }
+#endif
+    if (address >= 0x2F00 && address <= 0x3160) {
+        static int w2f16_cnt = 0;
+        if (w2f16_cnt < 40) {
+            uint32_t pc = m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF;
+            ESP_LOGW(TAG, "W2F16 #%d: $%04X<-%04X PC=$%06X", w2f16_cnt++, address, value & 0xFFFF, pc);
+        }
+    }
 
     /* Monitor 16-bit writes to SysZone header key fields */
     if (__builtin_expect(mac_boot_read_bypass &&
@@ -1151,22 +1641,114 @@ void m68k_write_memory_16(unsigned int address, unsigned int value)
         }
     }
 
+#endif /* MAC_DIAG */
     /* Fast path: normal mode RAM write — alias via ram_mask */
+#if MAC_ROM_LC_II
+#if MAC_DIAG
+    if (address >= 0x031C && address <= 0x031F) {
+        static int v8mt16_cnt = 0;
+        if (v8mt16_cnt < 6) {
+            ESP_LOGW(TAG, "V8MT16 #%d: $%04X<-%04X PC=$%06X",
+                     v8mt16_cnt++, address, value & 0xFFFF,
+                     m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF);
+        }
+    }
+    if (address >= 0x1FFAC0 && address <= 0x1FFAF0) {
+        static int v8cs16_cnt = 0;
+        if (v8cs16_cnt < 6) {
+            ESP_LOGW(TAG, "V8CS16 #%d: $%06X<-%04X PC=$%06X",
+                     v8cs16_cnt++, address, value & 0xFFFF,
+                     m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF);
+        }
+    }
+    if (address >= 0x360000 && address <= 0x36000F) {
+        static int v8cp16_cnt = 0;
+        if (v8cp16_cnt < 8) {
+            ESP_LOGW(TAG, "V8CPY16 #%d: $%06X<-%04X PC=$%06X",
+                     v8cp16_cnt++, address, value & 0xFFFF,
+                     m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF);
+        }
+    }
+#endif /* MAC_DIAG */
+    if (__builtin_expect(!via_overlay_fast &&
+        (address < ram_size), 1)) {
+#else
     if (__builtin_expect(!via_overlay_fast && address < 0x400000, 1)) {
+#endif
         if (__builtin_expect(!mac_boot_read_bypass || address >= 0x0A20, 1)) {
             uint32_t ra = address & ram_mask;
+            ARM_FAST_WR();
             ram[ra]   = (value >> 8) & 0xFF;
             ram[ra+1] = value & 0xFF;
             return;
         }
     }
+#if MAC_ROM_LC_II
+    if (VRAM_HIT(address, 2)) {
+        uint8_t *v = v8_vram + (address - V8_VRAM_BASE);
+        v[0] = (uint8_t)(value >> 8); v[1] = (uint8_t)value;
+        return;
+    }
+#endif
     mem_write_byte(address, (value >> 8) & 0xFF);
     mem_write_byte(address + 1, value & 0xFF);
 }
 
-void m68k_write_memory_32(unsigned int address, unsigned int value)
+MEM_CB_ATTR void m68k_write_memory_32(unsigned int address, unsigned int value)
 {
     address &= 0x00FFFFFF;
+#if MAC_DIAG
+#if MAC_ROM_LC_II
+    if (address >= 0x031C && address <= 0x031F) {
+        static int v8mt = 0;
+        if (v8mt < 10) {
+            ESP_LOGW(TAG, "V8MT32 #%d: $031C<-%08X PC=$%06X", v8mt++, value,
+                     m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF);
+        }
+    }
+    if (address >= 0x5FBFF0 && address <= 0x5FC010) {
+        static int v8wc = 0;
+        if (v8wc < 16) {
+            ESP_LOGW(TAG, "V8WC32 #%d: $%06X<-%08X PC=$%06X", v8wc++, address, value,
+                     m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF);
+        }
+    }
+    if (address >= 0x400000 && address <= 0x40000F) {
+        static int v8cp = 0;
+        if (v8cp < 8) {
+            ESP_LOGW(TAG, "V8CP32 #%d: $%06X<-%08X PC=$%06X", v8cp++, address, value,
+                     m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF);
+        }
+    }
+    if (address >= 0x4D4EDC && address <= 0x4D4EEF) {
+        static int v8cb = 0;
+        if (v8cb < 12) {
+            ESP_LOGW(TAG, "V8CB32 #%d: $%06X<-%08X PC=$%06X", v8cb++, address, value,
+                     m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF);
+        }
+    }
+    if (address >= 0x0FF9F0 && address <= 0x0FF9FF) {
+        static int v8stk = 0;
+        if (v8stk < 12) {
+            ESP_LOGW(TAG, "V8STK32 #%d: $%06X<-%08X PC=$%06X", v8stk++, address, value,
+                     m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF);
+        }
+    }
+    if (address >= 0x100000 && address < 0x100010) {
+        static int v8c100 = 0;
+        if (v8c100 < 12) {
+            ESP_LOGW(TAG, "V8C100 #%d: $%06X<-%08X PC=$%06X", v8c100++, address, value,
+                     m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF);
+        }
+    }
+#endif
+    if (address >= 0x2F00 && address <= 0x3160) {
+        static int w2f32_cnt = 0;
+        if (w2f32_cnt < 40) {
+            uint32_t pc = m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF;
+            ESP_LOGW(TAG, "W2F32 #%d: $%04X<-%08X PC=$%06X", w2f32_cnt++, address, value, pc);
+        }
+    }
 
     /* Monitor writes to TB[$112] (_InitWindows) at $1248 */
     if (__builtin_expect(mac_boot_read_bypass && address == 0x001248, 0)) {
@@ -1199,10 +1781,43 @@ void m68k_write_memory_32(unsigned int address, unsigned int value)
         }
     }
 
+#endif /* MAC_DIAG */
     /* Fast path: normal mode RAM write — alias via ram_mask */
+#if MAC_ROM_LC_II
+#if MAC_DIAG
+    if (address >= 0x031C && address <= 0x031F) {
+        static int v8mt32_cnt = 0;
+        if (v8mt32_cnt < 6) {
+            ESP_LOGW(TAG, "V8MT32 #%d: $%04X<-%08X PC=$%06X",
+                     v8mt32_cnt++, address, value,
+                     m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF);
+        }
+    }
+    if (address >= 0x1FFAC0 && address <= 0x1FFAF0) {
+        static int v8cs32_cnt = 0;
+        if (v8cs32_cnt < 6) {
+            ESP_LOGW(TAG, "V8CS32 #%d: $%06X<-%08X PC=$%06X",
+                     v8cs32_cnt++, address, value,
+                     m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF);
+        }
+    }
+    if (address >= 0x360000 && address <= 0x36000F) {
+        static int v8cp32_cnt = 0;
+        if (v8cp32_cnt < 8) {
+            ESP_LOGW(TAG, "V8CPY32 #%d: $%06X<-%08X PC=$%06X",
+                     v8cp32_cnt++, address, value,
+                     m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF);
+        }
+    }
+#endif /* MAC_DIAG */
+    if (__builtin_expect(!via_overlay_fast &&
+        (address < ram_size), 1)) {
+#else
     if (__builtin_expect(!via_overlay_fast && address < 0x400000, 1)) {
+#endif
         if (__builtin_expect(!mac_boot_read_bypass || address >= 0x0A20, 1)) {
             uint32_t ra = address & ram_mask;
+            ARM_FAST_WR();
             if (__builtin_expect(ra + 3 < ram_size, 1)) {
                 ram[ra]   = (value >> 24) & 0xFF;
                 ram[ra+1] = (value >> 16) & 0xFF;
@@ -1218,6 +1833,14 @@ void m68k_write_memory_32(unsigned int address, unsigned int value)
             return;
         }
     }
+#if MAC_ROM_LC_II
+    if (VRAM_HIT(address, 4)) {
+        uint8_t *v = v8_vram + (address - V8_VRAM_BASE);
+        v[0] = (uint8_t)(value >> 24); v[1] = (uint8_t)(value >> 16);
+        v[2] = (uint8_t)(value >> 8);  v[3] = (uint8_t)value;
+        return;
+    }
+#endif
     mem_write_byte(address, (value >> 24) & 0xFF);
     mem_write_byte(address + 1, (value >> 16) & 0xFF);
     mem_write_byte(address + 2, (value >> 8) & 0xFF);
@@ -1258,30 +1881,51 @@ IRAM_ATTR unsigned int m68k_read_immediate_16(unsigned int address)
     }
 
     /* Post-boot: lean RAM fast path */
-    if (__builtin_expect(address < 0x400000, 1)) {
+#if MAC_ROM_LC_II
+    if (__builtin_expect(address < ram_size, 1)) {
         uint32_t ra = address & ram_mask;
+        ARM_FAST_FETCH();
         return (ram[ra] << 8) | ram[ra + 1];
     }
+#else
+    if (__builtin_expect(address < 0x400000, 1)) {
+        uint32_t ra = address & ram_mask;
+        ARM_FAST_FETCH();
+        return (ram[ra] << 8) | ram[ra + 1];
+    }
+#endif
 
     /* Post-boot: lean ROM fast path with essential patches only.
      * Only functional intercepts that affect Finder operation are kept.
      * Diagnostic logging (_InitGraf, _InitFonts, etc.) is omitted. */
+#if MAC_ROM_LC_II
+    if (__builtin_expect(address >= 0xA00000 && address < 0xB00000, 1)) {
+#else
     if (__builtin_expect(address < 0x500000, 1)) {
+#endif
+#if !MAC_ROM_LC_II
         /* UNIMP trap handler: return safe stub instead of system error */
         if (__builtin_expect(address == 0x400768, 0)) return 0x91C8; /* SUBA.L A0,A0 */
         if (__builtin_expect(address == 0x40076A, 0)) return 0x7000; /* MOVEQ #0,D0 */
         if (__builtin_expect(address == 0x40076C, 0)) return 0x4E75; /* RTS */
+#endif
         /* Device Manager intercepts (Finder disk I/O) */
-        if (__builtin_expect(address == 0x40315C, 0)) return read16_dm_read();
-        if (__builtin_expect(address == 0x4031BE, 0)) return read16_dm_spin_rescue();
-        if (__builtin_expect(address == 0x4031E0, 0)) return read16_dm_ctl();
-        if (__builtin_expect(address == 0x4031EE, 0)) return read16_dm_stat();
+#if !MAC_ROM_LC_II
+        if (__builtin_expect(address == DM_READ_ENTRY, 0)) return read16_dm_read();
+        if (__builtin_expect(address == DM_SPIN_LOOP, 0)) return read16_dm_spin_rescue();
+        if (__builtin_expect(address == DM_CTL_ENTRY, 0)) return read16_dm_ctl();
+        if (__builtin_expect(address == DM_STAT_ENTRY, 0)) return read16_dm_stat();
+#endif
+#if !MAC_ROM_LC_II
         /* .SONY driver intercepts */
         if (__builtin_expect(address == 0x434B76, 0)) return read16_prime();
         if (__builtin_expect(address == 0x434BAC, 0)) return read16_sony();
+#endif
         /* Return ROM data directly — no diagnostic logging */
         uint32_t a = address & rom_mask;
-        return (rom[a] << 8) | rom[a + 1];
+        uint16_t w = (rom[a] << 8) | rom[a + 1];
+        CLASSIC_NATIVE_PATCH_LEAN(a, w);
+        return w;
     }
 
     /* Peripheral space (shouldn't happen for instruction fetch) */
@@ -1297,14 +1941,22 @@ IRAM_ATTR unsigned int m68k_read_immediate_32(unsigned int address)
     }
 
     /* Post-boot: lean RAM read */
+#if MAC_ROM_LC_II
+    if (__builtin_expect(address < ram_size, 1)) {
+#else
     if (__builtin_expect(address < 0x400000, 1)) {
+#endif
         uint32_t ra = address & ram_mask;
         return ((uint32_t)ram[ra] << 24) | ((uint32_t)ram[ra+1] << 16) |
                ((uint32_t)ram[ra+2] << 8) | ram[ra+3];
     }
 
     /* Post-boot: lean ROM read (no intercepts for 32-bit immediate data) */
+#if MAC_ROM_LC_II
+    if (__builtin_expect(address >= 0xA00000 && address < 0xB00000, 1)) {
+#else
     if (__builtin_expect(address < 0x500000, 1)) {
+#endif
         uint32_t a = address & rom_mask;
         return ((uint32_t)rom[a] << 24) | ((uint32_t)rom[a+1] << 16) |
                ((uint32_t)rom[a+2] << 8) | rom[a+3];
@@ -1321,12 +1973,21 @@ IRAM_ATTR unsigned int m68k_read_pcrelative_8(unsigned int address)
         return m68k_read_memory_8(address);
     }
 
+#if MAC_ROM_LC_II
+    if (__builtin_expect(address < ram_size, 1)) {
+        return ram[address & ram_mask];
+    }
+    if (__builtin_expect(address >= 0xA00000 && address < 0xB00000, 1)) {
+        return rom[address & rom_mask];
+    }
+#else
     if (__builtin_expect(address < 0x400000, 1)) {
         return ram[address & ram_mask];
     }
     if (__builtin_expect(address < 0x500000, 1)) {
         return rom[address & rom_mask];
     }
+#endif
 
     return m68k_read_memory_8(address);
 }
@@ -1339,11 +2000,19 @@ IRAM_ATTR unsigned int m68k_read_pcrelative_16(unsigned int address)
         return m68k_read_memory_16(address);
     }
 
+#if MAC_ROM_LC_II
+    if (__builtin_expect(address < ram_size, 1)) {
+#else
     if (__builtin_expect(address < 0x400000, 1)) {
+#endif
         uint32_t ra = address & ram_mask;
         return (ram[ra] << 8) | ram[ra + 1];
     }
+#if MAC_ROM_LC_II
+    if (__builtin_expect(address >= 0xA00000 && address < 0xB00000, 1)) {
+#else
     if (__builtin_expect(address < 0x500000, 1)) {
+#endif
         uint32_t a = address & rom_mask;
         return (rom[a] << 8) | rom[a + 1];
     }
@@ -1359,12 +2028,20 @@ IRAM_ATTR unsigned int m68k_read_pcrelative_32(unsigned int address)
         return m68k_read_memory_32(address);
     }
 
+#if MAC_ROM_LC_II
+    if (__builtin_expect(address < ram_size, 1)) {
+#else
     if (__builtin_expect(address < 0x400000, 1)) {
+#endif
         uint32_t ra = address & ram_mask;
         return ((uint32_t)ram[ra] << 24) | ((uint32_t)ram[ra+1] << 16) |
                ((uint32_t)ram[ra+2] << 8) | ram[ra+3];
     }
+#if MAC_ROM_LC_II
+    if (__builtin_expect(address >= 0xA00000 && address < 0xB00000, 1)) {
+#else
     if (__builtin_expect(address < 0x500000, 1)) {
+#endif
         uint32_t a = address & rom_mask;
         return ((uint32_t)rom[a] << 24) | ((uint32_t)rom[a+1] << 16) |
                ((uint32_t)rom[a+2] << 8) | rom[a+3];

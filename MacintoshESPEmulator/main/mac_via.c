@@ -2,6 +2,12 @@
  * VIA 6522 Emulation for Macintosh Classic
  */
 #include "mac_via.h"
+#include "mac_emulator.h"   /* CLASSIC_NATIVE_LCD (default of CLASSIC_VIA_ECLOCK) */
+#include "m68k.h"           /* m68k_cycles_run() for mid-slice timer reads */
+#if MAC_ROM_LC_II
+#include "mac_egret.h"
+#include "mac_v8video.h"
+#endif
 #include <string.h>
 #include <esp_log.h>
 
@@ -28,6 +34,7 @@ typedef struct {
     bool t2_armed;          /* T2 fires on next underflow (always one-shot) */
 
     int sr_pending;         /* >0: countdown ticks until SR interrupt fires */
+    int e_rem;              /* V8: CPU cycles not yet turned into E-clock ticks */
 
     bool overlay;           /* ROM overlay at address 0 */
     bool overlay_was_off;   /* True once overlay has been OFF (vectors copied to RAM) */
@@ -68,6 +75,20 @@ void via_init(void)
      */
     via.ira = 0x0F;     /* PA0-PA2 high (no diag device), PA3 high (no SCC IRQ) */
     via.irb = 0x31;     /* PB0 high (RTC), PB3 low (button down — safe for boot), PB4+PB5 high (ADB idle) */
+#if MAC_ROM_LC_II
+    via.irb = 0x39;     /* V8: PB3 = Egret/Cuda TREQ (active low) idle high; no mouse button on VIA */
+    /* V8 model ID on PA6/PA4/PA2/PA1 (ROM $A047C6, matched against
+     * ProductInfo $20/$24): Color Classic = 0/0/0/1 -> ProductInfo $A03858.
+     * PA0 and PA3 stay high as on the Classic.
+     * LC / LC II (same ROM; ProductInfo $A03BA6, BoxFlag $0D) = 1/1/1/0.
+     * Selected by MAC_V8_CUDA, the same switch as the Egret/Cuda HLE. */
+#if MAC_V8_CUDA
+    via.ira = 0x0B;
+#else
+    via.ira = 0x5D;
+#endif
+    egret_init();
+#endif
     via.t1_latch = 0xFFFF;
     via.t1_counter = 0xFFFF;
     ESP_LOGI(TAG, "VIA initialized, overlay enabled");
@@ -80,6 +101,10 @@ void via_reset(void)
 
 void via_set_mouse_button(bool pressed)
 {
+#if MAC_ROM_LC_II
+    (void)pressed;      /* V8: PB3 is Egret TREQ; the button comes via ADB */
+    return;
+#endif
     /* PB3 = mouse button, active low: 0=pressed, 1=released */
     if (pressed) {
         via.irb &= ~0x08;
@@ -95,7 +120,76 @@ static void via_update_irq(void)
     } else {
         via.ifr &= ~VIA_IRQ_ANY;
     }
+#if MAC_ROM_LC_II
+    /* Drive the CPU IRQ line immediately rather than at the next slice
+     * boundary.  Otherwise a level-1 request that the ROM has already
+     * cleared (IFR/IER/T2CH write) is still taken as soon as it lowers
+     * the SR mask: the LC II TimeDBRA calibration at $A00800 then counts
+     * 0 DBRAs and the boot dies on DIVU #0 at $A43A8C (Sad Mac 0F/0004). */
+    via_update_cpu_irq();
+#endif
 }
+
+#if MAC_ROM_LC_II
+/* V8 CPU interrupt level: pseudo-VIA2 (slot VBL) = 2, VIA1 = 1 */
+void via_update_cpu_irq(void)
+{
+    int lvl = v8video_irq_pending() ? M68K_IRQ_2 :
+              (via.ifr & VIA_IRQ_ANY) ? M68K_IRQ_1 : M68K_IRQ_NONE;
+    m68k_set_irq(lvl);
+}
+#endif
+
+/* Timer read-back. via_tick() only runs between execution slices (up to
+ * 4000 cycles), so a counter read mid-slice would be frozen.  On V8 the
+ * System's Time Manager calibration (InsTime/PrimeTime, ~3000-cycle DBRA
+ * loops, RmvTime) then measures 0 elapsed and divides by zero (bomb box
+ * "divide by zero" right after "Welcome to Macintosh").  Interpolate with
+ * the E-clock ticks (CPU/10, see via_tick) already run in the current
+ * slice; only costs on timer reads. */
+/* Classic timer model.
+ *  CLASSIC_VIA_INTERP (default 1): timer reads interpolate the cycles already
+ *    run in the current slice, and a counter load mid-slice is pre-biased by
+ *    them (the next via_tick() subtracts the whole slice).
+ *  CLASSIC_VIA_ECLOCK (default = CLASSIC_NATIVE_LCD): timers count at the E
+ *    clock (CPU/10) like the real Classic / V8, instead of 1 per CPU cycle.
+ * Why: a System Time Manager calibration (RAM code, 10x {PrimeTime; 4x
+ * TimeDBRA DBRA loops; RmvTime}, then DIVU by the shortest time and, later,
+ * DIVU by result/100) divides by zero unless timer readings are both
+ * non-zero (needs INTERP) and on the real time scale (needs ECLOCK: with the
+ * 10x-fast timers TimeDBRA calibrates to $44 and result/100 == 0). The old
+ * slice-frozen, 10x-fast model only survived by slice-phase luck; the native
+ * 480x320 patches shift the phase and it crashed at F5230. Both 0 = the
+ * historical model (output byte-identical to the pre-change build). */
+#ifndef CLASSIC_VIA_ECLOCK
+#define CLASSIC_VIA_ECLOCK CLASSIC_NATIVE_LCD
+#endif
+#define VIA_ECLOCK (MAC_ROM_LC_II || CLASSIC_VIA_ECLOCK)
+#if MAC_ROM_LC_II
+#define VIA_T_NOW(c) ((uint16_t)((c) - (uint16_t)((via.e_rem + m68k_cycles_run()) / 10)))
+#define VIA_T_LOAD(v) (v)
+#else
+#ifndef CLASSIC_VIA_INTERP
+#define CLASSIC_VIA_INTERP 1
+#endif
+#if CLASSIC_VIA_INTERP
+#if CLASSIC_VIA_ECLOCK
+#define VIA_RUN_TICKS() ((uint32_t)((via.e_rem + m68k_cycles_run()) / 10))
+#else
+#define VIA_RUN_TICKS() ((uint32_t)m68k_cycles_run())
+#endif
+#define VIA_T_NOW(c)  ((uint16_t)((c) - (uint16_t)VIA_RUN_TICKS()))
+static inline uint16_t via_t_load(uint16_t v)
+{
+    uint32_t b = (uint32_t)v + VIA_RUN_TICKS();
+    return (b > 0xFFFF) ? v : (uint16_t)b;   /* never wrap a fresh load */
+}
+#define VIA_T_LOAD(v) via_t_load(v)
+#else
+#define VIA_T_NOW(c)  (c)
+#define VIA_T_LOAD(v) (v)
+#endif
+#endif
 
 uint8_t via_read(uint32_t address)
 {
@@ -113,7 +207,9 @@ uint8_t via_read(uint32_t address)
          * Without this, INITs polling (ORB & $30)==$30 stall forever
          * because the bits are configured as outputs (via DDRB) and the
          * CPU wrote 0, but expects the ADB controller to pull them high. */
+#if !MAC_ROM_LC_II
         val |= 0x30;
+#endif
         /* Clear CB1/CB2 flags on read */
         via.ifr &= ~(VIA_IRQ_CB1 | VIA_IRQ_CB2);
         via_update_irq();
@@ -137,10 +233,10 @@ uint8_t via_read(uint32_t address)
     case VIA_REG_T1CL:
         via.ifr &= ~VIA_IRQ_T1;
         via_update_irq();
-        return via.t1_counter & 0xFF;
+        return VIA_T_NOW(via.t1_counter) & 0xFF;
 
     case VIA_REG_T1CH:
-        return (via.t1_counter >> 8) & 0xFF;
+        return (VIA_T_NOW(via.t1_counter) >> 8) & 0xFF;
 
     case VIA_REG_T1LL:
         return via.t1_latch & 0xFF;
@@ -152,10 +248,10 @@ uint8_t via_read(uint32_t address)
         via.t2cl_read_count++;
         via.ifr &= ~VIA_IRQ_T2;
         via_update_irq();
-        return via.t2_counter & 0xFF;
+        return VIA_T_NOW(via.t2_counter) & 0xFF;
 
     case VIA_REG_T2CH:
-        return (via.t2_counter >> 8) & 0xFF;
+        return (VIA_T_NOW(via.t2_counter) >> 8) & 0xFF;
 
     case VIA_REG_SR:
         via.ifr &= ~VIA_IRQ_SR;
@@ -186,6 +282,9 @@ void via_write(uint32_t address, uint8_t value)
         via.orb = value;
         via.ifr &= ~(VIA_IRQ_CB1 | VIA_IRQ_CB2);
         via_update_irq();
+#if MAC_ROM_LC_II
+        egret_portb_changed(via.orb, via.ddrb);
+#endif
         break;
 
     case VIA_REG_ORA:
@@ -195,13 +294,12 @@ void via_write(uint32_t address, uint8_t value)
          * first time clears the overlay flip-flop permanently. On real
          * hardware, the overlay only controls reads (ROM vs RAM at $0).
          * The first ORA write happens after vectors are copied to RAM. */
+#if !MAC_ROM_LC_II
         if (via.overlay) {
             ESP_LOGI(TAG, "Overlay cleared by ORA write (ORA=0x%02X)", value);
-            via.overlay = false;
-            via.overlay_was_off = true;
-            via_overlay_fast = false;
-            via_overlay_was_off_fast = true;
+            via_clear_overlay();
         }
+#endif
         if (reg == VIA_REG_ORA) {
             via.ifr &= ~(VIA_IRQ_CA1 | VIA_IRQ_CA2);
             via_update_irq();
@@ -211,6 +309,9 @@ void via_write(uint32_t address, uint8_t value)
 
     case VIA_REG_DDRB:
         via.ddrb = value;
+#if MAC_ROM_LC_II
+        egret_portb_changed(via.orb, via.ddrb);
+#endif
         break;
 
     case VIA_REG_DDRA: {
@@ -227,7 +328,7 @@ void via_write(uint32_t address, uint8_t value)
 
     case VIA_REG_T1CH:
         via.t1_latch = (via.t1_latch & 0x00FF) | ((uint16_t)value << 8);
-        via.t1_counter = via.t1_latch;
+        via.t1_counter = VIA_T_LOAD(via.t1_latch);
         via.t1_armed = true;
         via.ifr &= ~VIA_IRQ_T1;
         via_update_irq();
@@ -245,7 +346,7 @@ void via_write(uint32_t address, uint8_t value)
 
     case VIA_REG_T2CH:
         via.t2ch_write_count++;
-        via.t2_counter = ((uint16_t)value << 8) | via.t2_latch_low;
+        via.t2_counter = VIA_T_LOAD(((uint16_t)value << 8) | via.t2_latch_low);
         via.t2_armed = true;
         via.ifr &= ~VIA_IRQ_T2;
         via_update_irq();
@@ -259,7 +360,7 @@ void via_write(uint32_t address, uint8_t value)
          * early boot), schedule a SR interrupt to simulate the shift
          * completing. During early boot, the ROM uses VIA SR for SCC
          * handshake and does NOT expect SR interrupts. */
-        if ((via.acr & 0x1C) && via.adb_active) {
+        if ((via.acr & 0x1C) && via.adb_active && !MAC_ROM_LC_II) {
             via.sr_pending = 200;
             {
                 static int sr_write_log = 0;
@@ -281,7 +382,7 @@ void via_write(uint32_t address, uint8_t value)
          * completes, the handler switches ACR from shift-out (mode 7) to
          * shift-in (mode 1-3) to receive the device response. The SR
          * interrupt must fire again for the response phase. */
-        if (new_mode != 0 && new_mode != old_mode && via.adb_active) {
+        if (new_mode != 0 && new_mode != old_mode && via.adb_active && !MAC_ROM_LC_II) {
             via.sr_pending = 200;
         }
         break;
@@ -322,10 +423,16 @@ void via_one_second(void)
     /* CA2 is connected to the one-second interrupt from the RTC */
     via.ifr |= VIA_IRQ_CA2;
     via_update_irq();
+#if MAC_ROM_LC_II
+    egret_one_second();
+#endif
 }
 
 void via_tick(int cycles)
 {
+#if MAC_ROM_LC_II
+    egret_tick(cycles);
+#endif
     /* Shift Register completion: simulate ADB shift finishing */
     if (via.sr_pending > 0) {
         via.sr_pending -= cycles;
@@ -352,6 +459,18 @@ void via_tick(int cycles)
         }
     }
 
+#if VIA_ECLOCK
+    /* V8: VIA1 timers count at the E clock = CPU clock / 10 (783.36 kHz),
+     * like the real LC II.  (The Classic build keeps its historical
+     * 1-per-CPU-cycle rate.)  With the 10x-fast rate, the Time Manager's
+     * T2 reload loop at $A0B090 never sees a positive remainder once
+     * timer reads advance mid-slice, and spins forever at SR=$2700. */
+    {
+        int total = cycles + via.e_rem;
+        cycles = total / 10;
+        via.e_rem = total - cycles * 10;
+    }
+#endif
     /* Timer 1 */
     int old_t1 = via.t1_counter;
     via.t1_counter -= cycles;
@@ -393,6 +512,16 @@ bool via_irq_pending(void)
     return (via.ifr & via.ier & 0x7F) != 0;
 }
 
+/* Classic: first ORA write. V8: first access to the ROM's real address
+ * window $A00000 (ORA writes leave the overlay alone there). */
+void via_clear_overlay(void)
+{
+    via.overlay = false;
+    via.overlay_was_off = true;
+    via_overlay_fast = false;
+    via_overlay_was_off_fast = true;
+}
+
 bool via_get_overlay(void)
 {
     return via.overlay;
@@ -403,9 +532,24 @@ bool via_get_overlay_was_off(void)
     return via.overlay_was_off;
 }
 
+void via_egret_set_treq(bool asserted)
+{
+    if (asserted) via.irb &= ~0x08;
+    else          via.irb |= 0x08;
+}
+
+void via_egret_shift_done(bool in, uint8_t byte)
+{
+    if (in) via.sr = byte;
+    via.ifr |= VIA_IRQ_SR;
+    via_update_irq();
+}
+
+uint8_t via_get_sr(void) { return via.sr; }
 uint8_t via_get_ifr(void) { return via.ifr; }
 uint8_t via_get_ier(void) { return via.ier; }
 uint8_t via_get_acr(void) { return via.acr; }
+uint8_t via_get_ora(void) { return via.ora; }
 uint16_t via_get_t1(void) { return via.t1_counter; }
 uint16_t via_get_t2(void) { return via.t2_counter; }
 

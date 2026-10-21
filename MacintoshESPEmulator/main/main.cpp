@@ -12,6 +12,7 @@ extern "C" {
 #include "display.h"
 #include "mac_emulator.h"
 #include "mac_video.h"
+#include "mac_touch.h"
 }
 
 static const char *TAG = "main";
@@ -75,6 +76,11 @@ extern "C" void app_main(void)
         NULL,                   /* Task handle */
         VIDEO_TASK_CORE         /* Core */
     );
+
+    /* Step 5: Touch sampler (core 0, ~60 Hz, independent of emulation
+     * speed). No-op when TOUCH_SAMPLER_TASK=0: the emulation loop then
+     * polls the panel inline. */
+    touch_sampler_start();
 
     /* Main task can idle - emulator and video run independently */
     ESP_LOGI(TAG, "Emulator and video started. Main task idling.");
