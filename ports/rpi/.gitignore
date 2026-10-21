@@ -1,0 +1,8 @@
+# Build outputs and the staged SD card (firmware files are downloaded, not committed)
+*.o
+*.d
+*.elf
+*.lst
+*.map
+*.img
+sdcard/
