@@ -54,6 +54,7 @@ git-ignored) so you can rebuild the same disk later.
 | `--hd IMAGE` | Full System 7.5.3 install to copy the manifest items from |
 | `--extra PATH` | Add every app/file from a `.bin` file, an HFS image or a folder of them (repeatable). Copies *everything* at the image's top level. |
 | `--extra-file IMAGE NAME` | Add only the top-level item `NAME` from an HFS image (repeatable) — use it to leave read-mes, installers and unused data files out |
+| `--copy IMAGE SRC DEST` | Copy one item from an HFS image to an exact place on the new disk (colon paths), e.g. an extension: `--copy Big.dsk "System Folder:Extensions:Color Picker" "System Folder:Extensions:Color Picker"` — colour games that use the Color Picker package (PACK 12) quit with "error of type 29" without it |
 | `--silence-sounds` | Replace each `'snd '` resource of the added apps with a 44-byte silent sound. Resource IDs stay, so apps don't fail; typically saves a lot of space |
 | `--exclude NAME` / `--include NAME` | Drop a manifest item / add an optional one (e.g. `WindowShade`) |
 | `--size 2880K` \| `floppy` \| `<n>K/M` | Volume size. `2880K` is the default and the practical maximum (flash limit ≈ 2.89 MB). `floppy` = 1440 KB, dropping low-priority items until it fits |

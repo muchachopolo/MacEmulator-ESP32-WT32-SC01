@@ -186,6 +186,14 @@ Details: `docs/display-pipeline.md#touch-input`.
   matched by CurApName prefix) get the stock 512×342
   from ScrnSize/_ScrnBitMap, so a game that centres its field on screenBits is
   not cut off.
+- **LC II game full view** (`V8_GAME_FULL_VIEW`): InitGraf ($A86E, seen at the
+  A-line hook) from an app in `full_screen_apps[]` sets the main GDevice's
+  gdRect and PixMap bounds to 512×342 (`V8_GAME_FULL_H`), so Color QuickDraw
+  gives it 512×342 screenBits; the renderer scales that VRAM area to 480×320,
+  CrsrPin is widened, touch deltas are scaled and game-mode clicks keep h < 480
+  (the menu bar stays 480 wide). The app's ExitToShell (also taken after a
+  system-error quit) or InitGraf from an unlisted app restores the 480×320
+  device, CrsrPin and the 1:1 view.
 
 ## Build switches
 
@@ -197,6 +205,8 @@ Details: `docs/display-pipeline.md#touch-input`.
 | `V8_NATIVE_LCD` [1] | mac_v8video.h | LC II 512×384 VPBlocks patched to 480×320 |
 | `GAME_FULL_VIEW` [1] | mac_emulator.h | Classic: scaled 512×342 view for full-screen games (forced 0 on LC II or with `CLASSIC_NATIVE_LCD=0`) |
 | `GAME_FULL_SCREENBITS` [=`GAME_FULL_VIEW`] | mac_emulator.h | Listed games get stock 512×342 screenBits |
+| `V8_GAME_FULL_VIEW` [1] | mac_v8video.h | LC II: listed games get a 512×`V8_GAME_FULL_H` main GDevice at InitGraf, shown scaled (forced 0 with `V8_NATIVE_LCD=0`) |
+| `V8_GAME_FULL_H` [342] | mac_v8video.h | LC II game screen height (384 = the 12" mode; letterboxed, smaller) |
 | `CLASSIC_VIA_ECLOCK` [=`CLASSIC_NATIVE_LCD`] | mac_via.c | Classic VIA timers count at the E clock (CPU/10) |
 | `CLASSIC_VIA_INTERP` [1] | mac_via.c | Classic VIA timers interpolated mid-slice |
 | `CLASSIC_VIA_IRQ_NOW` [1] | mac_emulator.h | Classic: drive the level-1 IRQ line on every IFR/IER change |

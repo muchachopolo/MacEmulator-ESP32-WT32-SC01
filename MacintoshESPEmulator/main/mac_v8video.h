@@ -27,6 +27,29 @@ extern "C" {
 #define V8_NATIVE_LCD  1
 #endif
 
+/* LC II full view for full-screen games (V8_GAME_FULL_VIEW, default 1; needs
+ * V8_NATIVE_LCD). When an app listed in full_screen_apps[] (mac_memory.c,
+ * CurApName prefix) calls InitGraf, the main GDevice's gdRect and its
+ * PixMap bounds are set to 512 x V8_GAME_FULL_H (from the native 480x320),
+ * so the app's screenBits (copied from the PixMap by InitGraf) cover the
+ * size it was written for. The renderer then shows that area scaled to
+ * 480x320, CrsrPin is widened and touch deltas are scaled. The app's
+ * ExitToShell (or InitGraf from an unlisted app) restores the 480x320
+ * GDevice, CrsrPin and the crisp 1:1 view (mac_emulator.c v8gfv_*). */
+#ifndef V8_GAME_FULL_VIEW
+#define V8_GAME_FULL_VIEW  1
+#endif
+#if !V8_NATIVE_LCD
+#undef  V8_GAME_FULL_VIEW
+#define V8_GAME_FULL_VIEW  0
+#endif
+/* Game screen height: 342 (the stock compact-Mac field these games centre
+ * on screenBits; scales 342->320) or 384 (the LC II's 12" mode). */
+#ifndef V8_GAME_FULL_H
+#define V8_GAME_FULL_H     342
+#endif
+#define V8_GAME_FULL_W     512
+
 #define V8_VRAM_BASE   0xF40000
 #define V8_VRAM_SIZE   0x80000
 

@@ -216,6 +216,11 @@ static void v8_render(const uint8_t *mac_ram)
         v8_lut_depth = d;
     }
     int sw = v8video_screen_width(), sh = v8video_screen_height();
+#if V8_GAME_FULL_VIEW
+    /* Full-screen game (mac_emulator.c v8gfv_*): its 512-wide screen,
+     * scaled to the LCD. Read once per render. */
+    if (mac_full_view) { sw = V8_GAME_FULL_W; sh = V8_GAME_FULL_H; }
+#endif
     if (d != v8_tab_depth || sw != v8_tab_w || sh != v8_tab_h)
         v8_build_tables(d, sw, sh);
 

@@ -86,6 +86,37 @@ II starts at 1-bit; colour depths are chosen in the Monitors control panel
 panel's colour order has not yet been verified on the board** (the driver
 uses BGR element order).
 
+### LC II game full view (`V8_GAME_FULL_VIEW`, default 1)
+
+Color QuickDraw's InitGraf (LC II $A31530) copies screenBits from the main
+device's PixMap (baseAddr, rowBytes ÷ pixelSize, bounds), so in native mode
+every app sees 480×320, and a game that centres a fixed 512×342 field on
+screenBits.bounds loses its edges. The Classic's ScrnSize/_ScrnBitMap patch
+does not apply (Color QuickDraw does not call them), and the VPBlocks are only
+read at boot, so the per-app change is made to the GDevice instead:
+
+- At the A-line hook (before the trap runs), InitGraf from an app in
+  `full_screen_apps[]` (CurApName prefix) sets the main GDevice's gdRect
+  (+$22) and its PixMap bounds (+6) to 0,0,342,512 — only if both are the
+  native 480×320 and 512 px fit the PixMap's rowBytes and VRAM (1024 bytes per
+  row: 512 px fit at 1-8 bpp; 342 rows × 1024 = 342 KB of 512 KB). ScrnBase,
+  ScreenRow, GrayRgn and the other processes' QD globals are untouched.
+- `mac_full_view` is set: `v8_render()` scales 512×342 to 480×320 (forced
+  redraw on the switch). CrsrPin becomes 0,0,342,512, touch deltas are scaled
+  ×512/480, ×342/320, and game-mode clicks are posted with h < 480 (the menu
+  bar is still 480 wide; a click at h ≥ 480 missed it and switched to the
+  Finder).
+- The app's ExitToShell ($A9F4; the Process Manager takes the same path after
+  a system-error quit) or InitGraf from an unlisted app restores the rects
+  (if they still hold 512×342), CrsrPin and the cursor clamp; the view returns
+  to 1:1.
+- The GDevice is shared: if the Finder comes to the front while the game is
+  still running, it is drawn on the 512-wide device in the scaled view until
+  the game quits.
+- `V8_GAME_FULL_H=384` gives the 12" mode instead; the game then letterboxes
+  its field and the picture is squeezed more (384 → 320), so 342 is the
+  default.
+
 ## Panel configuration
 
 ST7796S driven through `esp_lcd_new_panel_st7789()` (compatible command set),

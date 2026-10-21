@@ -207,8 +207,15 @@ static inline uint16_t rd16(const uint8_t *r, uint32_t a)
 #define FV_STABLE_SAMPLES 30   /* x 4 frames = 2 s */
 #endif
 static int mac_vis_w = MAC_VIS_WIDTH, mac_vis_h = MAC_VIS_HEIGHT;
-#if GAME_FULL_VIEW && TOUCH_GAME_MODE
+#if MAC_ROM_LC_II && V8_GAME_FULL_VIEW
+#define V8GFV 1
+#else
+#define V8GFV 0
+#endif
+#if (GAME_FULL_VIEW && TOUCH_GAME_MODE) || V8GFV
 static int fv_acc_x, fv_acc_y;          /* touch scaling remainders */
+#endif
+#if GAME_FULL_VIEW && TOUCH_GAME_MODE
 static uint8_t fv_saved_pin[8];         /* CrsrPin before full view */
 
 static uint32_t fv_margin_hash(const uint8_t *r)
@@ -293,16 +300,142 @@ static void full_view_track(uint8_t *r, int frame)
     }
 }
 
-/* Finger movement (LCD pixels) -> Mac pixels on the scaled picture. */
+#endif
+
+#if (GAME_FULL_VIEW && TOUCH_GAME_MODE) || V8GFV
+/* Finger movement (LCD pixels) -> Mac pixels on the scaled picture
+ * (mac_vis_w x mac_vis_h: 512x342 in the Classic full view, 512 x
+ * V8_GAME_FULL_H in the LC II one). */
 static void full_view_scale(int *dx, int *dy)
 {
     if (!mac_full_view) return;
-    fv_acc_x += *dx * MAC_SCREEN_WIDTH;
+    fv_acc_x += *dx * mac_vis_w;
     *dx = fv_acc_x / DISPLAY_WIDTH;
     fv_acc_x -= *dx * DISPLAY_WIDTH;
-    fv_acc_y += *dy * MAC_SCREEN_HEIGHT;
+    fv_acc_y += *dy * mac_vis_h;
     *dy = fv_acc_y / DISPLAY_HEIGHT;
     fv_acc_y -= *dy * DISPLAY_HEIGHT;
+}
+#endif
+
+#if V8GFV
+/* ==== LC II full view for full-screen games (V8_GAME_FULL_VIEW) ====
+ * The LC II runs a native 480x320 mode (V8_NATIVE_LCD: the declaration
+ * ROM's 512x384 VPBlocks patched), so the main GDevice's gdRect and PixMap
+ * bounds are 480x320. Color QuickDraw's InitGraf (LC II $A31530) copies
+ * screenBits (baseAddr, rowBytes, bounds) from the main device's PixMap,
+ * so a game that centres a fixed 512x342 field on screenBits.bounds draws
+ * it 16 px left / 11 rows up and loses the edges.
+ * At the A-line hook (before the trap runs), InitGraf ($A86E) from an app
+ * in full_screen_apps[] (current process = CurApName) sets both rects to
+ * 0,0,V8_GAME_FULL_H,512; the app then gets that screenBits, its ports
+ * (OpenCPort copies the device PixMap) and centring. Nothing else in the
+ * system changes: ScrnBase / ScreenRow (VRAM, rowBytes 1024, enough for
+ * 512 px up to 8 bpp, and 342 or 384 rows of it), GrayRgn, the menu bar
+ * and the other processes' QD globals stay as they are. CrsrPin is
+ * widened, the renderer shows 512 x V8_GAME_FULL_H scaled to 480x320
+ * (mac_full_view) and touch deltas are scaled to match.
+ * Restore (GDevice, PixMap, CrsrPin, Mouse clamped, 1:1 view) when that
+ * app calls ExitToShell ($A9F4; also the Process Manager's path for an app
+ * that died with a system error), or when an unlisted app calls InitGraf.
+ * The rects are only written back if they still hold what was set (in
+ * case something rebuilt the GDevice meanwhile, e.g. a depth switch).
+ * The GDevice is shared: if the Finder comes to the front while the game
+ * is still running, it is drawn on the 512-wide device, in the scaled
+ * view, until the game quits. */
+static bool    v8gfv_on;
+static uint8_t v8gfv_saved_pin[8];
+
+/* Main GDevice -> its PixMap (pointers into RAM, 0 if not sane) */
+static bool v8gfv_dev(const uint8_t *r, uint32_t *gd, uint32_t *pm)
+{
+    uint32_t top = mac_mem_get_ram_size();
+    uint32_t h = rd32(r, 0x08A4) & 0xFFFFFF;            /* MainDevice */
+    if (h < 0x100 || h + 4 > top) return false;
+    uint32_t g = rd32(r, h) & 0xFFFFFF;
+    if (g < 0x100 || g + 0x3E > top) return false;
+    uint32_t ph = rd32(r, g + 0x16) & 0xFFFFFF;         /* gdPMap */
+    if (ph < 0x100 || ph + 4 > top) return false;
+    uint32_t p = rd32(r, ph) & 0xFFFFFF;
+    if (p < 0x100 || p + 0x32 > top) return false;
+    *gd = g; *pm = p;
+    return true;
+}
+
+static inline bool v8gfv_rect_is(const uint8_t *r, uint32_t a, int b, int rt)
+{
+    return rd32(r, a) == 0 && rd16(r, a + 4) == b && rd16(r, a + 6) == rt;
+}
+
+static inline void v8gfv_rect_set(uint8_t *r, uint32_t a, int b, int rt)
+{
+    wr32(r, a, 0); wr16(r, a + 4, (uint16_t)b); wr16(r, a + 6, (uint16_t)rt);
+}
+
+static void v8gfv_set(uint8_t *r, bool on, const char *why)
+{
+    const int nw = v8video_screen_width(), nh = v8video_screen_height();
+    uint32_t gd = 0, pm = 0;
+    bool dev = v8gfv_dev(r, &gd, &pm);
+    if (on) {
+        if (!dev || !v8gfv_rect_is(r, gd + 0x22, nh, nw) || !v8gfv_rect_is(r, pm + 6, nh, nw))
+            return;                                     /* not the native device */
+        int psize = rd16(r, pm + 0x20);
+        uint32_t rb = rd16(r, pm + 4) & 0x3FFF;
+        uint32_t base = rd32(r, pm) & 0xFFFFFF;
+        if (psize < 1 || psize > 16 || rb < (uint32_t)(V8_GAME_FULL_W * psize / 8) ||
+            base < V8_VRAM_BASE ||
+            base + (uint32_t)V8_GAME_FULL_H * rb > V8_VRAM_BASE + V8_VRAM_SIZE)
+            return;                                     /* 512 px would not fit */
+        v8gfv_rect_set(r, gd + 0x22, V8_GAME_FULL_H, V8_GAME_FULL_W);   /* gdRect */
+        v8gfv_rect_set(r, pm + 6,    V8_GAME_FULL_H, V8_GAME_FULL_W);   /* bounds */
+        memcpy(v8gfv_saved_pin, r + 0x0834, 8);
+        v8gfv_rect_set(r, 0x0834, V8_GAME_FULL_H, V8_GAME_FULL_W);      /* CrsrPin */
+        mac_vis_w = V8_GAME_FULL_W;
+        mac_vis_h = V8_GAME_FULL_H;
+    } else {
+        if (dev && v8gfv_rect_is(r, gd + 0x22, V8_GAME_FULL_H, V8_GAME_FULL_W))
+            v8gfv_rect_set(r, gd + 0x22, nh, nw);
+        if (dev && v8gfv_rect_is(r, pm + 6, V8_GAME_FULL_H, V8_GAME_FULL_W))
+            v8gfv_rect_set(r, pm + 6, nh, nw);
+        memcpy(r + 0x0834, v8gfv_saved_pin, 8);
+        if (rd16(r, 0x0838) > nh || rd16(r, 0x083A) > nw)
+            v8gfv_rect_set(r, 0x0834, nh, nw);
+        mac_vis_w = MAC_VIS_WIDTH;
+        mac_vis_h = MAC_VIS_HEIGHT;
+        /* clamp the cursor into the native screen */
+        int v = (int16_t)rd16(r, 0x0830), h = (int16_t)rd16(r, 0x0832);
+        if (v >= nh || h >= nw) {
+            if (v >= nh) v = nh - 1;
+            if (h >= nw) h = nw - 1;
+            uint32_t pt = ((uint32_t)(uint16_t)v << 16) | (uint16_t)h;
+            wr32(r, 0x0828, pt); wr32(r, 0x082C, pt); wr32(r, 0x0830, pt);
+            if (r[0x08CF]) r[0x08CE] = 0xFF;
+        }
+    }
+    v8gfv_on = on;
+    fv_acc_x = fv_acc_y = 0;
+    mac_full_view = on;
+    ESP_LOGI(TAG, "V8 GAME-VIEW %s (%s; CurApName len %d, depth %d bpp, GDevice $%06X PixMap $%06X)",
+             on ? "ON: main GDevice 512-wide, scaled view" : "OFF: 480x320 1:1",
+             why, r[0x0910], 1 << v8video_depth_log2(), (unsigned)gd, (unsigned)pm);
+}
+
+/* From mac_aline_hook(): every A-line trap, before it runs. */
+static inline void v8gfv_aline(unsigned int trap_word)
+{
+    unsigned t = trap_word & 0xFBFF;                    /* drop autopop bit */
+    if (t != 0xA86E && t != 0xA9F4) return;             /* InitGraf, ExitToShell */
+    if (!mac_post_boot) return;
+    uint8_t *r = mac_mem_get_ram();
+    if (!r) return;
+    bool listed = mac_full_screen_app();
+    if (t == 0xA86E) {
+        if (listed && !v8gfv_on)      v8gfv_set(r, true, "InitGraf");
+        else if (!listed && v8gfv_on) v8gfv_set(r, false, "InitGraf of another app");
+    } else if (listed && v8gfv_on) {
+        v8gfv_set(r, false, "ExitToShell");
+    }
 }
 #endif
 
@@ -400,7 +533,19 @@ static EVQ_UNUSED void mac_post_mouse_event(uint8_t *r, bool down, int mx, int m
     wr32(r, MB_TICKS, t);
     r[MB_STATE] = down ? 0x00 : 0x80;
     uint32_t where = rd32(r, MOUSE_PT);
-    if (game) where = (1u << 16) | (where & 0xFFFF);
+    if (game) {
+#if V8GFV
+        /* LC II full view: the cursor can reach h 480-511, but the menu bar
+         * is the native 480 wide; a click posted at h >= 480 misses it and
+         * the Process Manager switches to the Finder (seen on the host). */
+        int h = (int16_t)(where & 0xFFFF);
+        if (h >= v8video_screen_width()) h = v8video_screen_width() - 1;
+        if (h < 0) h = 0;
+        where = (1u << 16) | (uint16_t)h;
+#else
+        where = (1u << 16) | (where & 0xFFFF);
+#endif
+    }
     int rc = mac_post_event_rom(r, down ? 1 : 2, where);
     if (rc < 0) {
         static int fail_log;
@@ -463,6 +608,9 @@ static void v8_apply_touch(const touch_report_t *tr, int frame)
             int v = (int16_t)((r[0x0830] << 8) | r[0x0831]);
             int h = (int16_t)((r[0x0832] << 8) | r[0x0833]);
             int sw = v8video_screen_width(), shh = v8video_screen_height();
+#if V8GFV
+            if (mac_full_view) { sw = mac_vis_w; shh = mac_vis_h; }
+#endif
             h += pend_dx;
             v += pend_dy;
             if (h < 0) h = 0; else if (h >= sw) h = sw - 1;
@@ -629,6 +777,9 @@ static bool ff_ticks_wait_at(uint32_t pc)
 
 void mac_aline_hook(unsigned int trap_word, unsigned int trap_pc)
 {
+#if V8GFV
+    v8gfv_aline(trap_word);
+#endif
     ff_resume_armed = false;            /* the CPU has left the park point */
     if (trap_word != 0xABF7 || !mac_post_boot) return;
     trap_pc &= 0xFFFFFF;
@@ -671,6 +822,9 @@ static inline int ff_pending_level(void)
 void mac_aline_hook(unsigned int trap_word, unsigned int trap_pc)
 {
     (void)trap_word; (void)trap_pc;
+#if V8GFV
+    v8gfv_aline(trap_word);
+#endif
 }
 void mac_idle_note_irq(void) {}
 #endif /* MAC_IDLE_FF */
@@ -3762,6 +3916,9 @@ void mac_emu_run(void *param)
 #endif
 #if GAME_FULL_VIEW && TOUCH_GAME_MODE
             full_view_track(mac_mem_get_ram(), frame_count);
+            full_view_scale(&tr.dx, &tr.dy);
+#endif
+#if V8GFV
             full_view_scale(&tr.dx, &tr.dy);
 #endif
 #if MAC_ROM_LC_II

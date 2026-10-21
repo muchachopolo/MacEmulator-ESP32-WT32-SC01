@@ -424,7 +424,10 @@ def build(machfs, base, hd, extras, size, name, desktopdb=True):
                 continue
             items.append((prio, dst, node, ':'.join(src)))
     for nm, node in extras:
-        items.append((EXTRA_PRIORITY, EXTRA_DEST + (nm,), node, f'extra {nm}'))
+        if isinstance(nm, tuple):          # --copy: explicit destination path
+            items.append((EXTRA_PRIORITY, nm, node, 'copy ' + ':'.join(nm)))
+        else:
+            items.append((EXTRA_PRIORITY, EXTRA_DEST + (nm,), node, f'extra {nm}'))
 
     def try_write(sel):
         for prio, dst, node, label in sel:
@@ -525,6 +528,11 @@ def main():
                     metavar=('IMAGE', 'NAME'),
                     help='copy only top-level item NAME from HFS image IMAGE '
                          'into the apps folder (repeatable)')
+    ap.add_argument('--copy', nargs=3, action='append', default=[],
+                    metavar=('IMAGE', 'SRC', 'DEST'),
+                    help='copy item SRC (colon path, e.g. "System Folder:Extensions:'
+                         'Color Picker") from HFS image IMAGE to DEST on the new '
+                         'disk (repeatable)')
     ap.add_argument('--silence-sounds', action='store_true',
                     help="replace 'snd ' resources of added apps with a silent "
                          'sound (the board has no audio; saves space)')
@@ -547,6 +555,13 @@ def main():
     hd = read_volume(machfs, a.hd) if a.hd else None
     extras = list(collect_extras(machfs, a.extra))
     extras += list(collect_extra_files(machfs, a.extra_file))
+    for img, src, dst in a.copy:           # --copy IMAGE SRC DEST (colon paths)
+        v = read_volume(machfs, img)
+        try:
+            node = get_path(v, tuple(src.split(':')))
+        except KeyError:
+            raise SystemExit(f'--copy: "{src}" not found in {img}')
+        extras.append((tuple(dst.split(':')), node))
     if a.silence_sounds:
         silence_sounds(machfs, extras)
     if a.prep:

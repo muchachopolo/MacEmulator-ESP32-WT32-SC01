@@ -56,8 +56,9 @@ extern volatile bool mac_boot_read_bypass;
  * Enables lean instruction fetch path (skips diagnostic intercepts). */
 extern bool mac_post_boot;
 
-/* Classic GAME_FULL_SCREENBITS: true while the current process (CurApName)
- * is a listed full-screen game that gets the stock 512x342 screenBits. */
+/* True while the current process (CurApName) is a listed full-screen game:
+ * Classic GAME_FULL_SCREENBITS (stock 512x342 screenBits) and LC II
+ * V8_GAME_FULL_VIEW (512-wide main GDevice at its InitGraf). */
 bool mac_full_screen_app(void);
 
 /* Sync internal SRAM shadow from PSRAM after bulk low-memory patches.

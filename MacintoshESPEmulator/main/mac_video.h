@@ -23,7 +23,9 @@ extern "C" {
 
 /* Classic GAME_FULL_VIEW: set by the emulation loop (core 1) while a
  * full-screen game draws outside 480x320; the renderer (core 0) then shows
- * the whole 512x342 buffer scaled to 480x320 instead of the 1:1 480x320. */
+ * the whole 512x342 buffer scaled to 480x320 instead of the 1:1 480x320.
+ * LC II V8_GAME_FULL_VIEW: set while a listed game has the 512 x
+ * V8_GAME_FULL_H main GDevice; the renderer scales that VRAM area. */
 extern volatile bool mac_full_view;
 
 /* Initialize video subsystem (precompute scale tables, allocate line buffer) */
