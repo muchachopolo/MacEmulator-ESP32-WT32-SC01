@@ -5,6 +5,7 @@
 
 # ROM and disk images (copyrighted, not redistributable)
 ROM/
+!custom_*.dsk
 
 # Python
 __pycache__/
