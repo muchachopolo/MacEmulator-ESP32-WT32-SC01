@@ -6,8 +6,9 @@
 static const char From[] = "r1";
 
 // BCM2835/6 SPI0 clock = 250 MHz core / even divider.
-static const unsigned Clocks[] = { 15625000, 31250000, 41666666, 62500000 };
-static const char *const ClockText[] = { "15.6", "31.2", "41.7", "62.5" };
+// R1 result: 15.6 clean, 31.2 and above corrupt (74HC4094 chain) -> try between.
+static const unsigned Clocks[] = { 15625000, 17857142, 20833333, 25000000, 31250000 };
+static const char *const ClockText[] = { "15.6", "17.9", "20.8", "25.0", "31.2" };
 static const unsigned NumClocks = sizeof Clocks / sizeof Clocks[0];
 
 #define RGB565(r, g, b)	((u16) ((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3)))
@@ -130,7 +131,7 @@ TShutdownMode CKernel::Run (void)
 	m_LCD.Fill (0, 0, CILI9486::Width, CILI9486::Height, BLACK);
 	for (unsigned i = 0; i < NumClocks; i++)
 	{
-		unsigned y = 20 + i * 75;
+		unsigned y = 12 + i * 62;
 		char Fps[8];
 		CString s;
 		s.Format ("%u.%u", nFps10[i] / 10, nFps10[i] % 10);
@@ -138,9 +139,9 @@ TShutdownMode CKernel::Run (void)
 		Fps[sizeof Fps - 1] = 0;
 		DrawNumber (10, y, 6, ClockText[i], YELLOW);
 		unsigned nLen = nFps10[i] * 2;			// 0.1 fps -> 2 px
-		if (nLen > 260) nLen = 260;
+		if (nLen > 220) nLen = 220;
 		m_LCD.Fill (130, y, nLen, 30, GREEN);
-		DrawNumber (400, y, 6, Fps, WHITE);
+		DrawNumber (370, y, 6, Fps, WHITE);
 	}
 	m_Logger.Write (From, LogNotice, "Summary shown. Then cycling test patterns.");
 	CTimer::SimpleMsDelay (8000);
