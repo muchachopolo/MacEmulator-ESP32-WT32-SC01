@@ -2,7 +2,7 @@
 
 Written 2026-10-21. Goal: run the same emulator core (Mac Classic and LC II)
 on a **Raspberry Pi without an operating system**, booting straight from the
-SD card, with a 3.5-inch SPI touch shield. Status: R0 done, R1 display working (2026-10-21).
+SD card, with a 3.5-inch SPI touch shield. Status: R0 and R1 done, R2 (touch) under test (2026-10-21).
 
 **User's hardware (2026-10-21):**
 - **Raspberry Pi 2 Model B v1.1 (2014)** — BCM2836, **4× ARM Cortex-A7 @ 900 MHz**
@@ -112,7 +112,7 @@ Higher SPI clocks are often possible on these shields — measure.
 - [x] **R0. Identify the hardware**: Pi model, shield model/controller, touch
       type, pin mapping; set up `arm-none-eabi-gcc` + Circle (or decide on a
       from-scratch runtime).
-- [ ] **R1. Hello, display** (ILI9486 through the 16-bit shift registers: send the
+- [x] **R1. Hello, display** (ILI9486 through the 16-bit shift registers: send the
       fbtft `fb_ili9486`/`waveshare35a` init sequence as 16-bit words, DC on GPIO24,
       RESET on GPIO25; find the highest stable SPI clock, 16 → 32 → 48 MHz): Circle sample that initialises the ILI9486 over
       SPI and fills 480×320 test patterns; measure the achievable SPI clock.
@@ -120,9 +120,17 @@ Higher SPI clocks are often possible on these shields — measure.
       orientation (MADCTL 0x28) and RGB colour order correct. **15.6 MHz clean,
       6.3 fps full frame** (= the wire limit). 31.2/41.7/62.5 MHz corrupt (bits lost
       in the 74HC4094 chain) and plateau at ~11 fps (Circle polled SPI write).
-      R1b tests 17.9/20.8/25.0 MHz to find the real ceiling.
+      R1b/R1c: **17.9 MHz is the limit (7.2 fps full frame)**. Above it the
+      board drops pixels (a colour ramp breaks into shifted segments) and, with
+      commands at the same clock, window commands too; sending commands at
+      15.6 MHz fixes placement but not the dropped pixels. Driver:
+      `ports/rpi/common/ili9486.*`, `CILI9486::MaxClock`. A 20-line strip costs
+      ~8.6 ms, so dirty-strip rendering keeps the cursor and menus responsive;
+      smaller dirty rectangles are an R7 option.
 - [ ] **R2. Touch**: XPT2046 reads, calibration (stored in `/mac/config.txt`),
-      debug overlay of the touch point.
+      debug overlay of the touch point. Test app `ports/rpi/r2-touch/` (driver
+      `ports/rpi/common/xpt2046.*`: 1.95 MHz, median of 7, pressure Z): 4-target
+      calibration (axis swap + linear), then drawing with raw X/Y/Z shown.
 - [ ] **R3. Emulator core boots**: `ports/rpi1/` Makefile building `main/*.c`
       + Musashi with the shims; ROM and disk loaded from SD; render to the LCD;
       Classic boots to the Finder (compare screenshots/behaviour with the host

@@ -25,14 +25,6 @@ static const unsigned NumClocks = sizeof Clocks / sizeof Clocks[0];
 #define MAGENTA		RGB565 (255, 0, 255)
 #define GREY		RGB565 (128, 128, 128)
 
-// 3x5 font for "0123456789." (bit 2 = left column)
-static const u8 Digits[11][5] =
-{
-	{7,5,5,5,7}, {2,6,2,2,7}, {7,1,7,4,7}, {7,1,7,1,7}, {5,5,7,1,1},
-	{7,4,7,1,7}, {7,4,7,5,7}, {7,1,1,1,1}, {7,5,7,5,7}, {7,5,7,1,7},
-	{0,0,0,0,2},
-};
-
 CKernel::CKernel (void)
 :	m_Screen (m_Options.GetWidth (), m_Options.GetHeight ()),
 	m_Timer (&m_Interrupt),
@@ -56,28 +48,6 @@ boolean CKernel::Initialize (void)
 	if (bOK) bOK = m_Timer.Initialize ();
 	if (bOK) bOK = m_SPI.Initialize ();
 	return bOK;
-}
-
-void CKernel::DrawNumber (unsigned x, unsigned y, unsigned nScale, const char *pText, u16 nColor)
-{
-	for (; *pText; pText++, x += 4 * nScale)
-	{
-		int c = *pText == '.' ? 10 : *pText - '0';
-		if (c < 0 || c > 10)
-		{
-			continue;
-		}
-		for (unsigned row = 0; row < 5; row++)
-		{
-			for (unsigned col = 0; col < 3; col++)
-			{
-				if (Digits[c][row] & (4 >> col))
-				{
-					m_LCD.Fill (x + col * nScale, y + row * nScale, nScale, nScale, nColor);
-				}
-			}
-		}
-	}
 }
 
 void CKernel::DrawTestPattern (unsigned nClockIndex)
@@ -115,7 +85,7 @@ void CKernel::DrawTestPattern (unsigned nClockIndex)
 	m_LCD.Fill (W - 26, 2, 24, 24, GREEN);			//  TL red, TR green,
 	m_LCD.Fill (2, H - 26, 24, 24, BLUE);			//  BL blue, BR white
 	m_LCD.Fill (W - 26, H - 26, 24, 24, WHITE);
-	DrawNumber (W / 2 - 60, H * 2 / 3 + 30, 8, ClockText[nClockIndex], BLACK);
+	m_LCD.DrawDigits (W / 2 - 60, H * 2 / 3 + 30, 8, ClockText[nClockIndex], BLACK);
 }
 
 TShutdownMode CKernel::Run (void)
@@ -153,11 +123,11 @@ TShutdownMode CKernel::Run (void)
 		s.Format ("%u.%u", nFps10[i] / 10, nFps10[i] % 10);
 		strncpy (Fps, s, sizeof Fps - 1);
 		Fps[sizeof Fps - 1] = 0;
-		DrawNumber (10, y, 5, ClockText[i], YELLOW);
+		m_LCD.DrawDigits (10, y, 5, ClockText[i], YELLOW);
 		unsigned nLen = nFps10[i] * 2;			// 0.1 fps -> 2 px
 		if (nLen > 260) nLen = 260;
 		m_LCD.Fill (110, y, nLen, 25, GREEN);
-		DrawNumber (390, y, 5, Fps, WHITE);
+		m_LCD.DrawDigits (390, y, 5, Fps, WHITE);
 	}
 	m_Logger.Write (From, LogNotice, "Summary shown. Then cycling test patterns.");
 	CTimer::SimpleMsDelay (8000);

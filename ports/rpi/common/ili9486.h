@@ -15,6 +15,7 @@ class CILI9486
 public:
 	static const unsigned Width  = 480;
 	static const unsigned Height = 320;
+	static const unsigned MaxClock = 17857142;		// 250 MHz / 14, see R1
 
 	CILI9486 (CSPIMaster *pSPI, unsigned nChipSelect = 0,
 		  unsigned nDCPin = 24, unsigned nResetPin = 25);
@@ -29,6 +30,11 @@ public:
 	void Fill (unsigned x, unsigned y, unsigned w, unsigned h, u16 nColor);
 	// Write a w*h block of RGB565 pixels (row-major).
 	void Blit (unsigned x, unsigned y, unsigned w, unsigned h, const u16 *pPixels);
+
+	// Digits, '.' and '-' in a 3x5 font scaled by nScale (cell 4*nScale wide).
+	static const unsigned NoBackground = 0x10000;
+	void DrawDigits (unsigned x, unsigned y, unsigned nScale, const char *pText,
+			 u16 nColor, unsigned nBackground = NoBackground);
 
 private:
 	void Command (u8 nCmd);

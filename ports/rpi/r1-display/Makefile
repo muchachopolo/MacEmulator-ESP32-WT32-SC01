@@ -8,7 +8,9 @@
 #
 CIRCLEHOME ?= $(HOME)/tools/circle
 
-OBJS	= main.o kernel.o ili9486.o
+OBJS	= main.o kernel.o ../common/ili9486.o
+
+EXTRAINCLUDE = -I ../common
 
 LIBS	= $(CIRCLEHOME)/lib/libcircle.a
 

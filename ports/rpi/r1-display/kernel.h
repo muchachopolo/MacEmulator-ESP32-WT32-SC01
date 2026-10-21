@@ -29,7 +29,6 @@ public:
 	TShutdownMode Run (void);
 
 private:
-	void DrawNumber (unsigned x, unsigned y, unsigned nScale, const char *pText, u16 nColor);
 	void DrawTestPattern (unsigned nClockIndex);
 
 	// do not change this order

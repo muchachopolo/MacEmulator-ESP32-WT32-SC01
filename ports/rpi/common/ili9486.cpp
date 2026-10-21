@@ -121,20 +121,14 @@ void CILI9486::SetWindow (unsigned x0, unsigned y0, unsigned x1, unsigned y1)
 {
 	u8 Col[4] = { (u8) (x0 >> 8), (u8) x0, (u8) (x1 >> 8), (u8) x1 };
 	u8 Row[4] = { (u8) (y0 >> 8), (u8) y0, (u8) (y1 >> 8), (u8) y1 };
-	if (m_nDataHz != m_nCmdHz)
-	{
-		m_pSPI->SetClock (m_nCmdHz);
-	}
+	m_pSPI->SetClock (m_nCmdHz);			// SPI0 is shared with the touch chip
 	Command (0x2A);
 	Data (Col, 4);
 	Command (0x2B);
 	Data (Row, 4);
 	Command (0x2C);					// memory write
 	m_DC.Write (HIGH);
-	if (m_nDataHz != m_nCmdHz)
-	{
-		m_pSPI->SetClock (m_nDataHz);
-	}
+	m_pSPI->SetClock (m_nDataHz);
 }
 
 void CILI9486::Fill (unsigned x, unsigned y, unsigned w, unsigned h, u16 nColor)
@@ -166,4 +160,39 @@ void CILI9486::Blit (unsigned x, unsigned y, unsigned w, unsigned h, const u16 *
 {
 	SetWindow (x, y, x + w - 1, y + h - 1);
 	SendWords (pPixels, w * h);
+}
+
+// 3x5 font for "0123456789.-" (bit 2 = left column)
+static const u8 Glyphs[12][5] =
+{
+	{7,5,5,5,7}, {2,6,2,2,7}, {7,1,7,4,7}, {7,1,7,1,7}, {5,5,7,1,1},
+	{7,4,7,1,7}, {7,4,7,5,7}, {7,1,1,1,1}, {7,5,7,5,7}, {7,5,7,1,7},
+	{0,0,0,0,2}, {0,0,7,0,0},
+};
+
+void CILI9486::DrawDigits (unsigned x, unsigned y, unsigned nScale, const char *pText,
+			   u16 nColor, unsigned nBackground)
+{
+	for (; *pText; pText++, x += 4 * nScale)
+	{
+		int c = *pText == '.' ? 10 : *pText == '-' ? 11 : *pText - '0';
+		if (nBackground != NoBackground)
+		{
+			Fill (x, y, 4 * nScale, 5 * nScale, (u16) nBackground);
+		}
+		if (c < 0 || c > 11)
+		{
+			continue;				// unknown: blank cell
+		}
+		for (unsigned row = 0; row < 5; row++)
+		{
+			for (unsigned col = 0; col < 3; col++)
+			{
+				if (Glyphs[c][row] & (4 >> col))
+				{
+					Fill (x + col * nScale, y + row * nScale, nScale, nScale, nColor);
+				}
+			}
+		}
+	}
 }
