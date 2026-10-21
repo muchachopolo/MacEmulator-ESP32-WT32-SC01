@@ -19,6 +19,7 @@
  */
 #include "mac_iwm.h"
 #include "mac_via.h"
+#include "mac_disk_overlay.h"
 #include "mac_memory.h"
 #include "m68k.h"
 #include <stdio.h>
@@ -251,7 +252,7 @@ static uint8_t get_sector_byte(int sector_0based, int pos)
         int data_offset = pos - 60;
         uint32_t img_offset = disk_offset(iwm.track, iwm.side, sector_1based);
         if (img_offset + data_offset < iwm.disk_size) {
-            byte = iwm.disk_data[img_offset + data_offset];
+            byte = disk_ov_byte(img_offset + data_offset);
         } else {
             byte = 0x00;
         }
@@ -261,7 +262,7 @@ static uint8_t get_sector_byte(int sector_0based, int pos)
         uint32_t img_offset = disk_offset(iwm.track, iwm.side, sector_1based);
         for (int i = 0; i < MFM_SECTOR_SIZE; i++) {
             uint8_t d = (img_offset + i < iwm.disk_size) ?
-                        iwm.disk_data[img_offset + i] : 0x00;
+                        disk_ov_byte(img_offset + i) : 0x00;
             crc ^= (uint16_t)d << 8;
             for (int j = 0; j < 8; j++) {
                 crc = (crc & 0x8000) ? ((crc << 1) ^ 0x1021) : (crc << 1);
@@ -1032,7 +1033,8 @@ static void ism_write(int reg, uint8_t value)
     }
 }
 
-/* Host-only (desktop-prep): disk image buffer is writable RAM. */
+/* true when the PSRAM write overlay is active (mac_disk_overlay.c):
+ * DISK_WRITABLE=1 and the pool allocated.  false = read-only volume. */
 bool iwm_disk_writable = false;
 
 void iwm_init(uint8_t *disk_data, uint32_t disk_size)
@@ -1041,6 +1043,7 @@ void iwm_init(uint8_t *disk_data, uint32_t disk_size)
     iwm.disk_data = disk_data;
     iwm.disk_size = disk_size;
     iwm.has_disk_image = (disk_data != NULL && disk_size > 0);
+    iwm_disk_writable = disk_ov_init(disk_data, disk_size);  /* writable disk */
     /* Start with disk NOT inserted.  The emulator main loop will
      * call iwm_insert_disk() after the ROM's event loop has started
      * so the ROM sees the "no disk → disk present" transition and

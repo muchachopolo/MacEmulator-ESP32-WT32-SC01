@@ -119,6 +119,25 @@ agent edits can't leak in; abort on "Hash of data verified" missing.
 - [ ] Open: games want 512×342 and a keyboard (see Step 2); writable disk (PSRAM overlay or
       flash); LC II Monitors cdev says "cannot be used" (V8 video not recognised).
 
+## Step 2d — Done 2026-10-21 (later)
+
+- [x] Writable disk Level 1: PSRAM copy-on-write overlay (`main/mac_disk_overlay.c`,
+      `DISK_WRITABLE`, `DISK_OVERLAY_KB` 384 Classic / 256 V8), Classic `.Sony _Write`
+      intercept ($4031CC, `read16_dm_write`), unlocked volume; lost at power-off. Level 2
+      (separate flash partition + flush + NVS PRAM) still open.
+- [x] Classic clicks: ROM-faithful PostEvent mirror (`CLASSIC_MOUSE_POSTEVENT`), no more
+      $C0/$D8 elements; touch **game mode** (`TOUCH_GAME_MODE`): windowless front app →
+      clicks posted at the menu bar so the Process Manager doesn't switch games out.
+- [x] Native speed-ups (step 3b): `components/musashi/mac_native.c` — native A-line trap
+      dispatcher (`MAC_NATIVE_TRAPDISP`, byte-identical), native dcmp 3 decompressor
+      (`MAC_NATIVE_DCMP`, output-exact, 2239 checked calls + offline test of every compressed
+      resource), ROM loop accelerator (`MAC_NATIVE_LOOPS`). Host: −81% (LC II) / −75% (Classic)
+      instructions to Finder. **Board (Classic + custom disk): Finder at ~63 s (was ~105 s).**
+- [ ] Follow-up: boot workarounds keyed to frame numbers (e.g. post-boot lean fetch at F2000)
+      now trigger after the Finder is up; switch them to "Finder launched" detection to reach
+      the estimated 20-30 s.
+- [ ] Not done from 3b: resource-map search and LC II handle traps (no zero-cost hook point).
+
 ## Step 3 — Native acceleration (the "native OS" track)
 
 Principle: do not rewrite Mac OS. Replace the hottest pieces with native C, guided by
@@ -174,7 +193,7 @@ guide); `origin/main` is at fbb47f5, so none of the recent work is on main; `ROM
 gitignored.
 
 Prepare the repo:
-- [ ] Merge `phase2-lc2-native` into `main` (PR or fast-forward) and push.
+- [x] Merge `phase2-lc2-native` into `main` (fast-forwarded to dd3fd66 on 2026-10-21; repeat for later work).
 - [ ] Write `README.md`: what it is plus a photo/GIF of the Finder on the board (the user
       provides it); exact board (WT32-SC01 v3.4) and where to buy; build and flash steps
       (`build.bat`, ESP-IDF v6.1); touch gestures; current speed and what works; known

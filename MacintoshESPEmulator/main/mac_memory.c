@@ -12,6 +12,7 @@
 #include "mac_iwm.h"
 #include "mac_v8video.h"
 #include "mac_v8disk.h"
+#include "mac_disk_overlay.h"   /* writable disk (PSRAM overlay) */
 #include "m68k.h"
 
 #include <string.h>
@@ -106,6 +107,7 @@ int v8_fetch_idx;
 #define DM_SPIN_LOOP     0x4031BE
 #define DM_CTL_ENTRY     0x4031E0
 #define DM_STAT_ENTRY    0x4031EE
+#define DM_WRITE_ENTRY   0x4031CC   /* DM _Write handler entry (writable disk) */
 #endif
 
 #if !MAC_ROM_LC_II && CLASSIC_NATIVE_LCD
@@ -817,7 +819,7 @@ static uint16_t read16_dm_spin_rescue(void)
             if (disk && io_cnt > 0 && io_cnt <= 0x100000 &&
                 buf_m + io_cnt <= ram_size &&
                 io_off >= 0 && (uint32_t)io_off + io_cnt <= dsize) {
-                memcpy(ram + buf_m, disk + io_off, io_cnt);
+                disk_ov_xfer(ram[a0m+0x07] == 0x03, ram + buf_m, io_off, io_cnt); /* ioTrap $A003: write */
             }
             /* ioResult = noErr, ioActCount = ioReqCount */
             ram[a0m+0x10] = 0; ram[a0m+0x11] = 0;
@@ -896,7 +898,7 @@ static uint16_t read16_dm_read(void)
             if (disk && io_cnt > 0 && io_cnt <= 0x100000 &&
                 buf_m + io_cnt <= ram_size &&
                 io_off >= 0 && (uint32_t)io_off + io_cnt <= dsize) {
-                memcpy(ram + buf_m, disk + io_off, io_cnt);
+                disk_ov_read(ram + buf_m, io_off, io_cnt);   /* overlay, else flash */
                 ram[a0m+0x28]=ram[a0m+0x24]; ram[a0m+0x29]=ram[a0m+0x25];
                 ram[a0m+0x2A]=ram[a0m+0x26]; ram[a0m+0x2B]=ram[a0m+0x27];
                 if (dm_cnt < 200) {
@@ -922,6 +924,56 @@ static uint16_t read16_dm_read(void)
     }
     return rom_word_at(DM_READ_ENTRY);
 }
+
+/* --- Classic writable disk: DM _Write intercept ($4031CC) ---------------
+ * Like read16_dm_read: a .Sony (ioRefNum -5) _Write is completed on the spot
+ * into the PSRAM overlay (mac_disk_overlay.c), sync or async (ioCompletion
+ * chained by dm_async_complete).  Pool full -> ioResult = dskFulErr, nothing
+ * written.  Only active when the overlay is (iwm_disk_writable); otherwise
+ * the ROM word is returned and the old read-only path runs. */
+#if !MAC_ROM_LC_II && DISK_WRITABLE
+static uint16_t read16_dm_write(void)
+{
+    uint32_t a0m = m68k_get_reg(NULL, M68K_REG_A0) & 0xFFFFFF & ram_mask;
+    if (!iwm_disk_writable || !ram || a0m + 0x32 >= ram_size ||
+        (int16_t)READ_WORD(ram, a0m+0x18) != -5)
+        return rom_word_at(DM_WRITE_ENTRY);
+    static int dw_cnt = 0;
+    uint32_t io_buf = READ_LONG(ram, a0m+0x20);
+    uint32_t io_cnt = READ_LONG(ram, a0m+0x24);
+    int32_t  io_off = (int32_t)READ_LONG(ram, a0m+0x2E);
+    uint32_t buf_m  = io_buf & ram_mask;
+    uint32_t dsize  = iwm_get_disk_size();
+    int16_t  err    = 0;
+    uint32_t done   = 0;
+    /* no disk-inserted check: the DM _Read intercept serves the volume
+     * before the IWM's deferred insert, and the mount writes the MDB then */
+    if (io_cnt > 0x100000 || buf_m + io_cnt > ram_size ||
+               io_off < 0 || (uint32_t)io_off + io_cnt > dsize) {
+        err = -50;                                  /* paramErr */
+    } else if (io_cnt) {
+        err = (int16_t)disk_ov_write(ram + buf_m, (uint32_t)io_off, io_cnt);
+        if (!err) done = io_cnt;
+    }
+    WRITE_LONG(ram, a0m+0x28, done);                /* ioActCount */
+    if (dw_cnt < 40 || err) {
+        ESP_LOGW(TAG, "DM-WRITE #%d buf=$%06X off=%ld cnt=%lu %s err=%d",
+                 dw_cnt, io_buf & 0xFFFFFF, (long)io_off, (unsigned long)io_cnt,
+                 (m68k_get_reg(NULL, M68K_REG_D1) & 0x0400) ? "async" : "sync", err);
+    }
+    dw_cnt++;
+    ram[a0m+0x10] = (uint8_t)((uint16_t)err >> 8);  /* ioResult */
+    ram[a0m+0x11] = (uint8_t)err;
+    m68k_set_reg(M68K_REG_D0, (uint32_t)(int32_t)err);
+    dm_async_complete(a0m, DM_WRITE_ENTRY);         /* async: run ioCompletion */
+    if (err)   /* completion / caller test the result: N set, Z clear */
+        m68k_set_reg(M68K_REG_SR, (m68k_get_reg(NULL, M68K_REG_SR) & ~0x0F) | 0x08);
+    ram[a0m+0x0C] = 0; ram[a0m+0x0D] = 0;           /* ioCompletion */
+    ram[a0m+0x0E] = 0; ram[a0m+0x0F] = 0;
+    return 0x4E75;  /* RTS */
+}
+#endif
+/* --- end writable disk DM _Write --- */
 
 /* Intercept Device Manager _Control handler at $4031E0.
  * When PB ioRefNum = -5 (.SONY), return noErr immediately. */
@@ -1056,7 +1108,7 @@ static uint16_t read16_read_trap(void)
 
     if (disk && ram && io_cnt > 0 && io_cnt <= 0x10000 &&
         buf_m + io_cnt <= ram_size && (uint32_t)io_off + io_cnt <= dsize) {
-        memcpy(ram + buf_m, disk + io_off, io_cnt);
+        disk_ov_read(ram + buf_m, io_off, io_cnt);
         ram[a0m+0x28] = ram[a0m+0x24]; ram[a0m+0x29] = ram[a0m+0x25];
         ram[a0m+0x2A] = ram[a0m+0x26]; ram[a0m+0x2B] = ram[a0m+0x27];
         ram[a0m+0x0C] = 0; ram[a0m+0x0D] = 0;
@@ -1101,7 +1153,7 @@ static uint16_t read16_prime(void)
         if (disk && io_cnt > 0 && io_cnt <= 0x100000 &&
             buf_m + io_cnt <= ram_size &&
             io_off >= 0 && (uint32_t)io_off + io_cnt <= dsize) {
-            memcpy(ram + buf_m, disk + io_off, io_cnt);
+            disk_ov_xfer((ioTrap & 0xFF) == 0x03, ram + buf_m, io_off, io_cnt);
             ram[a0m+0x28]=ram[a0m+0x24]; ram[a0m+0x29]=ram[a0m+0x25];
             ram[a0m+0x2A]=ram[a0m+0x26]; ram[a0m+0x2B]=ram[a0m+0x27];
             if (prime_cnt < 50) {
@@ -1158,7 +1210,7 @@ static uint16_t read16_sony(void)
         if (disk && io_cnt > 0 && io_cnt <= 0x100000 &&
             buf_m + io_cnt <= ram_size &&
             io_off >= 0 && (uint32_t)io_off + io_cnt <= dsize) {
-            memcpy(ram + buf_m, disk + io_off, io_cnt);
+            disk_ov_xfer((ioTrap & 0xFF) == 0x03, ram + buf_m, io_off, io_cnt);
             ram[a0m+0x28]=ram[a0m+0x24]; ram[a0m+0x29]=ram[a0m+0x25];
             ram[a0m+0x2A]=ram[a0m+0x26]; ram[a0m+0x2B]=ram[a0m+0x27];
             if (sony_cnt < 100) {
@@ -1431,6 +1483,9 @@ MEM_CB_ATTR unsigned int m68k_read_memory_16(unsigned int address)
             if (address == DM_SPIN_LOOP) return read16_dm_spin_rescue();
             if (address == DM_CTL_ENTRY) return read16_dm_ctl();
             if (address == DM_STAT_ENTRY) return read16_dm_stat();
+#if DISK_WRITABLE
+            if (address == DM_WRITE_ENTRY) return read16_dm_write();  /* writable disk */
+#endif
             if (address == 0x400DF4) read16_sub6_patch();  /* patches PB, falls through */
             if (address == BOOT_READ_HELPER) return read16_read_trap();
 #endif
@@ -2059,6 +2114,9 @@ IRAM_ATTR unsigned int m68k_read_immediate_16(unsigned int address)
         if (__builtin_expect(address == DM_SPIN_LOOP, 0)) return read16_dm_spin_rescue();
         if (__builtin_expect(address == DM_CTL_ENTRY, 0)) return read16_dm_ctl();
         if (__builtin_expect(address == DM_STAT_ENTRY, 0)) return read16_dm_stat();
+#if DISK_WRITABLE
+        if (__builtin_expect(address == DM_WRITE_ENTRY, 0)) return read16_dm_write(); /* writable disk */
+#endif
 #endif
 #if !MAC_ROM_LC_II
         /* .SONY driver intercepts */

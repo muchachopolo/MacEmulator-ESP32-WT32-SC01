@@ -8,6 +8,7 @@
 
 #include "mac_memory.h"
 #include "mac_iwm.h"
+#include "mac_disk_overlay.h"
 #include "m68k.h"
 #include <string.h>
 #include <esp_log.h>
@@ -100,14 +101,14 @@ static void v8disk_prime(void)
     } else if (!disk || !iwm_disk_inserted()) {
         err = offLinErr;
     } else if ((trap & 0x0F) == 0x03 && !iwm_disk_writable) {
-        err = wPrErr;                              /* image lives in flash */
+        err = wPrErr;                              /* DISK_WRITABLE=0: read-only */
     } else if (pos > dsize || cnt > dsize - pos || buf + cnt > rsz) {
         err = paramErr;
     } else if ((trap & 0x0F) == 0x03) {
-        memcpy(disk + pos, ram + buf, cnt);        /* host --disk-rw only */
-        done = cnt;
+        err = disk_ov_write(ram + buf, pos, cnt);  /* PSRAM overlay */
+        done = err ? 0 : cnt;
     } else {
-        memcpy(ram + buf, disk + pos, cnt);
+        disk_ov_read(ram + buf, pos, cnt);         /* overlay, else flash */
         done = cnt;
     }
     wr32(ram, pb + 0x28, done);                    /* ioActCount */
@@ -115,7 +116,8 @@ static void v8disk_prime(void)
     wr32(ram, pb + 0x2E, pos + done);              /* ioPosOffset */
     m68k_set_reg(M68K_REG_D0, (uint32_t)(int32_t)err);
 
-    if (n_calls < 40 || err != noErr || (iwm_disk_writable && (trap & 0x0F) == 0x03)) {
+    static uint32_t n_logw;                        /* writes / errors logged */
+    if (n_calls < 40 || ((err != noErr || (trap & 0x0F) == 0x03) && n_logw++ < 60)) {
         ESP_LOGW(TAG, "PRIME #%lu %s drv=%d pos=%lu cnt=%lu buf=$%06lX err=%d",
                  (unsigned long)n_calls, (trap & 0x0F) == 0x03 ? "W" : "R",
                  drive, (unsigned long)pos, (unsigned long)cnt,

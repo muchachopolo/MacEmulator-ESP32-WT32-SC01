@@ -42,8 +42,8 @@ WARN     := -Wall -Wno-unused-variable -Wno-unused-function -Wno-unused-but-set-
 # Same suppressions as components/musashi/CMakeLists.txt
 MUSASHI_WARN := -w
 
-CORE_SRCS := mac_emulator.c mac_memory.c mac_video.c mac_via.c mac_scc.c mac_scsi.c mac_iwm.c mac_egret.c mac_v8video.c mac_v8disk.c mac_touch.c mac_rtc.c
-MUSASHI_SRCS := m68kcpu.c m68kops.c softfloat/softfloat.c
+CORE_SRCS := mac_emulator.c mac_memory.c mac_video.c mac_via.c mac_scc.c mac_scsi.c mac_iwm.c mac_egret.c mac_v8video.c mac_v8disk.c mac_touch.c mac_rtc.c mac_disk_overlay.c
+MUSASHI_SRCS := m68kcpu.c m68kops.c softfloat/softfloat.c mac_native.c
 
 OBJS := $(addprefix $(BUILD)/main/,$(CORE_SRCS:.c=.o)) \
         $(addprefix $(BUILD)/musashi/,$(MUSASHI_SRCS:.c=.o)) \
@@ -79,7 +79,18 @@ run: $(BUILD)/macemu
 	./$(BUILD)/macemu --frames $(FRAMES) --shot-every 300 --out out \
 	    --dump-ram out/ram.bin --log out/emu.log
 
+# Offline check of the native 'dcmp' 3 (components/musashi/mac_native.c)
+# against the original 68k code, on every compressed resource of the images.
+DCMP_DISKS ?= $(wildcard $(ROM_DIR)/OS_750_boot.dsk $(ROM_DIR)/custom_753.dsk)
+$(BUILD)/dcmp_test: dcmp_test.c $(ROOT)/components/musashi/mac_native.c $(wildcard $(ROOT)/components/musashi/*.h) Makefile
+	@mkdir -p $(dir $@)
+	$(CC) $(ARCH) $(OPT) -std=gnu17 -fno-strict-aliasing -DHOST_BUILD=1 $(INCS) $(MUSASHI_WARN) -o $@ dcmp_test.c \
+	    $(ROOT)/components/musashi/m68kcpu.c $(ROOT)/components/musashi/m68kops.c \
+	    $(ROOT)/components/musashi/softfloat/softfloat.c -lm
+dcmp-test: $(BUILD)/dcmp_test
+	./$(BUILD)/dcmp_test $(DCMP_DISKS)
+
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all run clean
+.PHONY: all run clean dcmp-test

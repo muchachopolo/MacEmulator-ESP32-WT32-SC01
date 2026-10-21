@@ -22,9 +22,10 @@ extern "C" {
 /* Initialize IWM with an optional disk image */
 void iwm_init(uint8_t *disk_data, uint32_t disk_size);
 
-/* false (default, ESP32): the image lives in flash; writes fail with wPrErr
- * and the volume mounts locked. The host harness sets it for --disk-rw
- * (V8 .Sony path only) to let the Finder build the desktop database. */
+/* true: the image (read-only in flash) has a PSRAM copy-on-write overlay
+ * (mac_disk_overlay.c, DISK_WRITABLE) and the volume mounts unlocked.
+ * false: writes fail with wPrErr and the volume mounts locked. Set by
+ * iwm_init(). */
 extern bool iwm_disk_writable;
 
 uint8_t iwm_read(uint32_t address);

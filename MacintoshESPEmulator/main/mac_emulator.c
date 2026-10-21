@@ -10,6 +10,7 @@
 #include "mac_via.h"
 #include "mac_scc.h"
 #include "mac_iwm.h"
+#include "mac_disk_overlay.h"   /* writable disk */
 #include "mac_scsi.h"
 #if MAC_ROM_LC_II
 #include "mac_v8video.h"
@@ -60,17 +61,37 @@ static volatile int mouse_x = MAC_SCREEN_WIDTH / 2;
 static volatile int mouse_y = MAC_SCREEN_HEIGHT / 2;
 static volatile bool mouse_button = false;
 
-/* ------------------------------------------------------------------ */
-/* Mac Event Queue posting                                            */
-/* On the Mac Classic (ADB-based), mouseDown/mouseUp events must be   */
-/* posted to the OS event queue — setting MBState alone is not enough */
-/* because GetNextEvent/WaitNextEvent reads from the queue, not from  */
-/* MBState. Since we bypass ADB entirely, no handler posts mouse      */
-/* events. We post them directly using fixed EvQEl buffers in the     */
-/* 68010-reserved vector area ($00C0-$00FF), unused on the 68000 Mac. */
-/* ------------------------------------------------------------------ */
-#define EVT_BUF_DOWN   0x00C0   /* EvQEl for mouseDown (22 bytes) */
-#define EVT_BUF_UP     0x00D8   /* EvQEl for mouseUp  (22 bytes) */
+/* ==== Classic mouse-button event posting (touch -> Mac event queue) ====
+ * On the Mac Classic (ADB) GetNextEvent/WaitNextEvent read clicks from the
+ * OS event queue (EvQHdr $014A), not from MBState, and the emulator has no
+ * ADB mouse whose driver would post them. So the emulator posts them.
+ *
+ * CLASSIC_MOUSE_POSTEVENT=1 (default): do what the ROM's ADB mouse handler
+ * ($403A54) does on a button change -- RndSeed += Ticks-MBTicks, MBTicks =
+ * Ticks, MBState = $00/$80, then _PostEvent -- with PostEvent ($403EE6) and
+ * Enqueue ($402AB6) mirrored in C: honour SysEvtMask, take a free element
+ * of the OS's own event buffer (SysEvtBuf/SysEvtCnt, free = evtQWhat $FFFF;
+ * GetOSEvent/FlushEvents mark removed elements that way), else steal the
+ * oldest queued element, fill when=Ticks, where=Mouse, modifiers from
+ * KeyMap/MBState, qType=evType(4), append. No foreign elements enter the
+ * queue, so the OS's own free/steal logic stays consistent.
+ * CLASSIC_MOUSE_POSTEVENT=0: the old fixed EvQEl buffers at $C0/$D8 (in the
+ * 68010-reserved vector area), never re-enqueued while still linked. They
+ * are foreign to SysEvtBuf: when the buffer is full PostEvent steals the
+ * queue head, and if that is $C0/$D8 while a new post re-links the same
+ * element, the queue gets a qLink self-cycle.
+ *
+ * Both: posts are made only while the 68k's interrupt mask is 0, i.e. at a
+ * point where a real ADB (level 1) interrupt could post. Every queue
+ * operation in the OS runs with the mask raised (ORI #$0300), so this never
+ * edits the queue in the middle of Enqueue/Dequeue/PostEvent/GetOSEvent.
+ * Transitions wait in a small FIFO (normally < 1 frame). */
+#ifndef CLASSIC_MOUSE_POSTEVENT
+#define CLASSIC_MOUSE_POSTEVENT 1
+#endif
+
+#define EVT_BUF_DOWN   0x00C0   /* legacy EvQEl for mouseDown (22 bytes) */
+#define EVT_BUF_UP     0x00D8   /* legacy EvQEl for mouseUp  (22 bytes) */
 #define EVTQ_HEAD      0x014C   /* EvQHdr.qHead (long) */
 #define EVTQ_TAIL      0x0150   /* EvQHdr.qTail (long) */
 #define TICKS_GLOBAL   0x016A   /* Ticks low-memory global (long) */
@@ -90,55 +111,193 @@ static inline void wr16(uint8_t *r, uint32_t a, uint16_t v)
     r[a]=(v>>8)&0xFF; r[a+1]=v&0xFF;
 }
 
-#if !MAC_ROM_LC_II   /* V8 posts mouse events through the emulated ADB mouse */
+/* ==== Touch "game mode" (TOUCH_GAME_MODE, default 1) ====
+ * Full-screen games that draw straight to the screen (a full-screen game) own no
+ * windows. A mouseDown event from them is routed by System 7's Process
+ * Manager to the layer under the point -- the Finder's -- which switches the
+ * game out. While such an app is in front, a tap sets the button state
+ * (MBState $0172, read by _Button; VIA PB3 on the Classic) and posts its
+ * mouseDown/mouseUp with evtQWhere in the menu bar (v=1, h=Mouse.h), which
+ * the Process Manager leaves to the front app. (A state-only click is not
+ * enough: a full-screen game polls GetNextEvent, never _Button, for start and
+ * fire.) The cursor position (Mouse/RawMouse/MTemp) is unchanged. Apps with
+ * any window (Finder, DAs, dialogs, SimpleText ...) get normal events.
+ * Detection: low-memory globals are swapped per process, so at frame end
+ * WindowList ($09D6) / CurApName ($0910) describe the CURRENT process. A
+ * windowless game in front still yields a few frames to the Finder's
+ * background time, so a score is kept per frame (two compares): +1 while a
+ * windowless non-Finder app is current, -4 otherwise; game mode when the
+ * score >= 60 (about 1 s of the game in front; ~0.25 s to leave). The mode
+ * is decided at button-down and kept for the matching button-up. */
+#ifndef TOUCH_GAME_MODE
+#define TOUCH_GAME_MODE 1
+#endif
+#if TOUCH_GAME_MODE
+static int gm_score;
+
+static void game_mode_track(const uint8_t *r)
+{
+    if (!r || !mac_post_boot) return;
+    int al = r[0x0910];                    /* CurApName */
+    int fl = r[0x02E0];                    /* FinderName */
+    bool finder = (al == fl && al > 0 && al < 32 &&
+                   memcmp(r + 0x0911, r + 0x02E1, al) == 0);
+    bool game = (al > 0 && al < 32 && !finder && rd32(r, 0x09D6) == 0);
+    if (game) { if (gm_score < 120) gm_score++; }
+    else      { gm_score -= 4; if (gm_score < 0) gm_score = 0; }
+}
+
+static bool game_mode_active(void)
+{
+    return gm_score >= 60;
+}
+#endif
+
+/* Event-queue helpers (both builds: the LC II uses them for game-mode
+ * clicks only; its normal clicks go through the emulated ADB mouse). */
+#define SYS_EVT_MASK   0x0144   /* word */
+#define SYS_EVT_BUF    0x0146   /* long: event buffer */
+#define SYS_EVT_CNT    0x0154   /* word: buffer elements - 1 */
+#define RND_SEED       0x0156
+#define MB_TICKS       0x016E
+#define MB_STATE       0x0172
+#define KEYMAP_MODS    0x017A   /* KeyMap word holding the modifier keys */
+#define MOUSE_PT       0x0830
+#define EVQEL_SIZE     22
+#define EVQ_UNUSED     __attribute__((unused))
+
+static inline uint16_t rd16(const uint8_t *r, uint32_t a)
+{
+    return (uint16_t)((r[a] << 8) | r[a+1]);
+}
+
+#if !MAC_ROM_LC_II && !CLASSIC_MOUSE_POSTEVENT
 /* Check if a given address is currently in the active event queue */
 static bool evt_in_queue(const uint8_t *r, uint32_t target)
 {
+    uint32_t top = mac_mem_get_ram_size();
     uint32_t addr = rd32(r, EVTQ_HEAD);
-    for (int i = 0; i < 50 && addr != 0; i++) {
+    for (int i = 0; i < 64 && addr != 0; i++) {
         if (addr == target) return true;
-        if (addr >= 0x200000) break;  /* invalid pointer */
+        if (addr >= top) break;          /* invalid pointer */
         addr = rd32(r, addr);         /* follow qLink */
     }
     return false;
 }
+#endif
 
-/* Post a mouseDown (code=1) or mouseUp (code=2) event to the Mac
- * event queue. Uses fixed EvQEl buffers at EVT_BUF_DOWN / EVT_BUF_UP. */
-static void mac_post_mouse_event(uint8_t *r, int code, int mx, int my)
+/* ROM Enqueue ($402AB6 Classic) on EvQHdr */
+static EVQ_UNUSED void evq_append(uint8_t *r, uint32_t el)
 {
-    uint32_t buf = (code == 1) ? EVT_BUF_DOWN : EVT_BUF_UP;
-
-    /* Don't overwrite if our previous event is still in the queue */
-    if (evt_in_queue(r, buf)) return;
-
-    /* Fill EvQEl (22 bytes) */
-    wr32(r, buf + 0,  0);              /* qLink = NULL (last element) */
-    wr16(r, buf + 4,  5);              /* qType = evType */
-    wr16(r, buf + 6,  (uint16_t)code); /* evtQWhat */
-    wr32(r, buf + 8,  0);              /* evtQMessage */
-    wr32(r, buf + 12, rd32(r, TICKS_GLOBAL)); /* evtQWhen */
-    wr16(r, buf + 16, (uint16_t)my);   /* evtQWhere.v */
-    wr16(r, buf + 18, (uint16_t)mx);   /* evtQWhere.h */
-    wr16(r, buf + 20, 0);              /* evtQModifiers */
-
-    /* Link into the event queue */
-    uint32_t head = rd32(r, EVTQ_HEAD);
-    if (head == 0) {
-        /* Queue empty — our element is both head and tail */
-        wr32(r, EVTQ_HEAD, buf);
-        wr32(r, EVTQ_TAIL, buf);
+    uint32_t top = mac_mem_get_ram_size();
+    wr32(r, el, 0);                          /* qLink = NIL */
+    uint32_t tail = rd32(r, EVTQ_TAIL);
+    if (rd32(r, EVTQ_HEAD) == 0 || tail == 0 || tail >= top) {
+        wr32(r, EVTQ_HEAD, el);
+        wr32(r, EVTQ_TAIL, el);
     } else {
-        /* Append to tail */
-        uint32_t tail = rd32(r, EVTQ_TAIL);
-        if (tail != 0 && tail < 0x200000) {
-            wr32(r, tail, buf);  /* old tail.qLink → our element */
-        }
-        wr32(r, EVTQ_TAIL, buf);
+        wr32(r, tail, el);                   /* old tail.qLink -> el */
+        wr32(r, EVTQ_TAIL, el);
     }
 }
 
-#endif /* !MAC_ROM_LC_II */
+/* ROM PostEvent (Classic $403EE6; same code in the LC II ROM) for an event
+ * with message 0, posted at 'where' (a Mac Point, v<<16|h).
+ * Returns 0 = posted, 1 = masked by SysEvtMask, -1 = no element. */
+static EVQ_UNUSED int mac_post_event_rom(uint8_t *r, int what, uint32_t where)
+{
+    uint32_t top = mac_mem_get_ram_size();
+    if (!(rd16(r, SYS_EVT_MASK) & (1u << what))) return 1;   /* evtNotEnb */
+    uint32_t buf = rd32(r, SYS_EVT_BUF) & 0xFFFFFF;
+    int cnt = rd16(r, SYS_EVT_CNT);
+    if (buf < 0x100 || cnt > 256 || buf + (cnt + 1) * EVQEL_SIZE > top)
+        return -1;
+    uint32_t el = 0;
+    for (int i = 0; i <= cnt; i++) {                 /* DBEQ: cnt+1 elements */
+        uint32_t e = buf + i * EVQEL_SIZE;
+        if (rd16(r, e + 6) == 0xFFFF) { el = e; break; }
+    }
+    if (!el) {                       /* all in use: recycle the oldest event */
+        el = rd32(r, EVTQ_HEAD);
+        if (el == 0 || el >= top) return -1;
+        wr32(r, EVTQ_HEAD, rd32(r, el));
+    }
+    uint16_t km = rd16(r, KEYMAP_MODS);
+    wr16(r, el + 6,  (uint16_t)what);                /* evtQWhat */
+    wr32(r, el + 8,  0);                             /* evtQMessage */
+    wr32(r, el + 12, rd32(r, TICKS_GLOBAL));         /* evtQWhen */
+    wr32(r, el + 16, where);                         /* evtQWhere */
+    r[el + 20] = (uint8_t)((km << 1) | (km >> 15));  /* ROL.W #1, low byte */
+    r[el + 21] = r[MB_STATE];                        /* btnState */
+    wr16(r, el + 4, 4);                              /* qType = evType */
+    evq_append(r, el);
+    return 0;
+}
+
+/* Post a mouseDown (down) or mouseUp event, as the ROM's ADB mouse handler
+ * (Classic $403A54) does: RndSeed, MBTicks, MBState, then PostEvent at
+ * Mouse. A game-mode click (TOUCH_GAME_MODE) is posted at the menu bar
+ * (v=1, h=Mouse.h): the Process Manager's layer check (FindWindow ->
+ * inMenuBar) then leaves it to the front app instead of switching to the
+ * Finder, whose layer owns every point outside the app's (absent) windows. */
+static EVQ_UNUSED void mac_post_mouse_event(uint8_t *r, bool down, int mx, int my, bool game)
+{
+    (void)mx; (void)my;
+#if !MAC_ROM_LC_II && !CLASSIC_MOUSE_POSTEVENT
+    if (!game) {
+        uint32_t buf = down ? EVT_BUF_DOWN : EVT_BUF_UP;
+        /* Never re-link an element that is still in the queue (qLink cycle) */
+        if (evt_in_queue(r, buf)) return;
+        if (!(rd16(r, SYS_EVT_MASK) & (1u << (down ? 1 : 2)))) return;
+        wr16(r, buf + 4,  4);              /* qType = evType */
+        wr16(r, buf + 6,  down ? 1 : 2);   /* evtQWhat */
+        wr32(r, buf + 8,  0);              /* evtQMessage */
+        wr32(r, buf + 12, rd32(r, TICKS_GLOBAL)); /* evtQWhen */
+        wr16(r, buf + 16, (uint16_t)my);   /* evtQWhere.v */
+        wr16(r, buf + 18, (uint16_t)mx);   /* evtQWhere.h */
+        wr16(r, buf + 20, down ? 0x0000 : 0x0080); /* evtQModifiers.btnState */
+        evq_append(r, buf);
+        return;
+    }
+#endif
+    uint32_t t = rd32(r, TICKS_GLOBAL);
+    wr32(r, RND_SEED, rd32(r, RND_SEED) + (t - rd32(r, MB_TICKS)));
+    wr32(r, MB_TICKS, t);
+    r[MB_STATE] = down ? 0x00 : 0x80;
+    uint32_t where = rd32(r, MOUSE_PT);
+    if (game) where = (1u << 16) | (where & 0xFFFF);
+    int rc = mac_post_event_rom(r, down ? 1 : 2, where);
+    if (rc < 0) {
+        static int fail_log;
+        if (fail_log++ < 5)
+            ESP_LOGW(TAG, "MOUSE-POST: no event element (SysEvtBuf=$%06lX)",
+                     (unsigned long)rd32(r, SYS_EVT_BUF));
+    }
+}
+
+/* Button transitions waiting for a point where the 68k could take an
+ * interrupt (SR mask 0). After 30 frames without one they are posted
+ * anyway (a click is better than none; the OS never masks that long while
+ * editing the queue). Entry: bit 0 = down, bit 1 = game-mode click. */
+static uint8_t mb_pend[8];
+static int mb_pend_n, mb_pend_wait;
+
+static EVQ_UNUSED void mouse_btn_queue(bool down, bool game)
+{
+    if (mb_pend_n < (int)sizeof(mb_pend))
+        mb_pend[mb_pend_n++] = (uint8_t)((down ? 1 : 0) | (game ? 2 : 0));
+}
+
+static EVQ_UNUSED void mouse_btn_flush(uint8_t *r, int mx, int my)
+{
+    if (mb_pend_n == 0) return;
+    if ((m68k_get_reg(NULL, M68K_REG_SR) & 0x0700) && ++mb_pend_wait < 30)
+        return;
+    for (int i = 0; i < mb_pend_n; i++)
+        mac_post_mouse_event(r, mb_pend[i] & 1, mx, my, (mb_pend[i] & 2) != 0);
+    mb_pend_n = 0;
+    mb_pend_wait = 0;
+}
 
 #if MAC_ROM_LC_II
 /* V8 touch -> cursor. Position is absolute: the movement is added to the
@@ -182,13 +341,24 @@ static void v8_apply_touch(const touch_report_t *tr, int frame)
             wait_frames = 0;
         }
     }
-    egret_adb_mouse(0, 0, tr->button);
+    /* Game mode (see TOUCH_GAME_MODE): the ADB mouse keeps its button up
+     * (its handler would post at Mouse); the click is posted at the menu
+     * bar instead, MBState included (mac_post_mouse_event). */
+    static bool gm_click;
+    if (tr->btn_changed && r) {
+#if TOUCH_GAME_MODE
+        if (tr->button) gm_click = game_mode_active();
+#endif
+        if (gm_click) mouse_btn_queue(tr->button, true);
+    }
+    if (r) mouse_btn_flush(r, 0, 0);
+    egret_adb_mouse(0, 0, gm_click ? false : tr->button);
     if (tr->btn_changed) {
         static int blog;
         if (r && blog < 60) {
             blog++;
-            ESP_LOGI(TAG, "TOUCH-BTN F%d %s at Mouse=(%d,%d)", frame,
-                     tr->button ? "DOWN" : "UP",
+            ESP_LOGI(TAG, "TOUCH-BTN F%d %s%s at Mouse=(%d,%d)", frame,
+                     tr->button ? "DOWN" : "UP", gm_click ? " (game mode)" : "",
                      (int16_t)((r[0x0832] << 8) | r[0x0833]),
                      (int16_t)((r[0x0830] << 8) | r[0x0831]));
         }
@@ -717,7 +887,7 @@ void mac_emu_run(void *param)
                                 buf_m + ioReqCount <= ram_sz &&
                                 ioPosOffset >= 0 &&
                                 (uint32_t)ioPosOffset + ioReqCount <= dsize) {
-                                memcpy(rram + buf_m, disk + ioPosOffset, ioReqCount);
+                                disk_ov_xfer(rram[a0m+0x07] == 0x03, rram + buf_m, ioPosOffset, ioReqCount); /* writable disk: overlay */
                                 rram[a0m+0x28]=rram[a0m+0x24]; rram[a0m+0x29]=rram[a0m+0x25];
                                 rram[a0m+0x2A]=rram[a0m+0x26]; rram[a0m+0x2B]=rram[a0m+0x27];
                                 /* Clear ioCompletion */
@@ -2170,7 +2340,8 @@ void mac_emu_run(void *param)
                      * intercept copied disk data INTO the write buffer) and
                      * async ones (Desktop Manager on volumes >= 2 MB) never
                      * completed, hanging the File Manager. */
-                    ram_ptr[0x0042]=0x80;                       /* writeProt */
+                    /* writable disk (mac_disk_overlay.c): unlocked when the PSRAM overlay is active */
+                    ram_ptr[0x0042]=iwm_disk_writable ? 0x00 : 0x80; /* writeProt */
                     ram_ptr[0x0043]=0x02;                       /* diskInPlace=2 */
                     ram_ptr[0x0044]=0xFF;                       /* installed=-1 */
                     ram_ptr[0x0045]=0xFF;                       /* sides=-1 */
@@ -3080,6 +3251,7 @@ void mac_emu_run(void *param)
             uint32_t sd_pc = m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF;
             if (!sd_logged && mac_post_boot && sd_pc >= 0x401602 && sd_pc < 0x401640) {
                 ESP_LOGW(TAG, "SHUTDOWN: safe to power off (F%d)", frame_count);
+                disk_ov_log_stats("shutdown");   /* writable disk */
                 sd_logged = true;
             }
         }
@@ -3254,14 +3426,23 @@ void mac_emu_run(void *param)
                      * This is essential: the Mac Classic event system (GetNextEvent/
                      * WaitNextEvent) reads from the queue, not from MBState.
                      * Without this, clicks are invisible to applications. */
-                    mac_post_mouse_event(r, mb ? 1 : 2, mx, my);
+                    static bool gm_click;   /* decided at down, kept for up */
+#if TOUCH_GAME_MODE
+                    if (mb) gm_click = game_mode_active();
+#endif
+                    mouse_btn_queue(mb, gm_click);
+                    mouse_btn_flush(r, mx, my);
                     static int btn_log = 0;
                     if (btn_log < 30) {
-                        ESP_LOGW(TAG, "MOUSE-BTN: %s F%d mx=%d my=%d $172=%02X evQ=%08lX",
+                        ESP_LOGW(TAG, "MOUSE-BTN: %s F%d mx=%d my=%d $172=%02X evQ=%08lX%s%s",
                                  mb ? "DOWN" : "UP", frame_count, mx, my, r[0x0172],
-                                 (unsigned long)rd32(r, EVTQ_HEAD));
+                                 (unsigned long)rd32(r, EVTQ_HEAD),
+                                 mb_pend_n ? " (deferred: SR mask)" : "",
+                                 gm_click ? " (game mode: posted at menu bar)" : "");
                         btn_log++;
                     }
+                } else {
+                    mouse_btn_flush(r, mx, my);   /* deferred transitions */
                 }
             }
         }
@@ -3441,6 +3622,9 @@ void mac_emu_run(void *param)
             touch_poll_inline(esp_timer_get_time());
             touch_report_t tr;
             touch_consume(&tr);
+#if TOUCH_GAME_MODE
+            game_mode_track(mac_mem_get_ram());
+#endif
 #if MAC_ROM_LC_II
             v8_apply_touch(&tr, frame_count);
 #else

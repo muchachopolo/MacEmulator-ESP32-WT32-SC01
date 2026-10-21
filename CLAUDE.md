@@ -171,9 +171,11 @@ Implementation (`mac_touch.c` gestures/sampler, `mac_emulator.c` apply):
 2. Touch axes are swapped and horizontal inverted vs display orientation
 3. Gesture detection: tracks touch start time/position, classifies as tap or drag
 4. Cursor delta applied only during drags (not on first touch frame)
-5. Mouse button via **three layers**:
-   - **Event queue posting** (`mac_post_mouse_event()`) — Posts mouseDown/mouseUp events directly to the Mac OS event queue (EvQHdr at $014A). Uses fixed EvQEl structures at $00C0 and $00D8 (68010-reserved vector area). **This is the essential layer** — GetNextEvent/WaitNextEvent reads from the queue, not MBState.
-   - **MBState ($0172)** bit 7 — software mirror (0=down, 1=up), written every frame for code that reads MBState directly (_Button trap)
+5. Mouse button (2026-10-21 rework):
+   - **Classic (`CLASSIC_MOUSE_POSTEVENT=1`)**: a C mirror of the ROM's ADB mouse handler ($403A54): RndSeed, MBTicks, MBState $00/$80, then PostEvent ($403EE6) into the System's own SysEvtBuf (honours SysEvtMask; qType 4). Posts only when the 68k SR interrupt mask is 0, so they can never land inside an OS queue routine. The old fixed EvQEl buffers at $C0/$D8 are gone (=0 restores them, de-duplicated).
+   - **LC II**: the emulated ADB mouse (Egret) carries the button; the ROM's handler posts the event.
+   - **Game mode (`TOUCH_GAME_MODE=1`)**: when the front app has no windows (WindowList $09D6 == NULL and CurApName != Finder for ~1 s), clicks are still posted but at the menu bar (v=1), so the Process Manager does not switch a full-screen game (e.g. a full-screen game) out to the Finder.
+   - **MBState ($0172)** written as a whole byte ($00 down / $80 up) every frame — the shutdown screen's Restart loop waits for exactly $00.
    - **VIA PB3** (`via_set_mouse_button()`) — hardware button, active low. VIA IRB initialized to $31 (PB3=0, button down during boot — required for boot to work).
 6. Per-frame writes cursor position to Mac low-memory globals (gated by `mac_post_boot` + WMgrPort valid, **only when position changes**):
    - MTemp ($0828), RawMouse ($082C), Mouse ($0830) — big-endian Mac Point (Y.hi Y.lo X.hi X.lo)
@@ -182,7 +184,7 @@ Implementation (`mac_touch.c` gestures/sampler, `mac_emulator.c` apply):
 
 **CRITICAL**: CrsrNew must NOT be written unconditionally every frame — it forces cursor redraws that crash the resource decompressor (DCMP) during INIT/Finder loading. Only set CrsrNew when mouse position actually changes. Initial tracking values must match `mouse_x`/`mouse_y` defaults to prevent a false change on first WMgrPort-valid frame.
 
-**CRITICAL**: On ADB Macs (like Mac Classic), the event system does NOT poll MBState for click detection. Mouse events must be POSTED to the event queue at $014A. Setting MBState alone is insufficient — applications using WaitNextEvent/GetNextEvent/ModalDialog never see clicks without queue-posted events.
+**CRITICAL**: On ADB Macs (like Mac Classic), the event system does NOT poll MBState for click detection. Mouse events must be POSTED to the event queue at $014A (now via the PostEvent mirror above). Setting MBState alone is insufficient — applications using WaitNextEvent/GetNextEvent/ModalDialog never see clicks without queue-posted events.
 
 ## Key Design Decisions
 

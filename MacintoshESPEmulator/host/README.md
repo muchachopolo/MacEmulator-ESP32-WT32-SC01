@@ -61,7 +61,8 @@ Options:
 - `--out DIR`: the screenshot directory. The default is `out`.
 - `--dump-ram FILE`: write the 2 MB Mac RAM image to FILE at exit.
 - `--log FILE`: write the emulator log to FILE instead of stderr. Host `H` lines always go to stderr.
-- `--disk-rw FILE` (LC II build): mount the embedded disk writable (the .Sony Prime hook copies _Write data into the image) and write the modified image to FILE at exit. Used by `tools/build_disk.py --prep` to let the Finder build the desktop database; the firmware disk is always read-only.
+- `--disk-rw FILE`: raise the write-overlay pool to the whole image (so it never fills) and write the image as modified (flash image + overlay) to FILE at exit. Used by `tools/build_disk.py --prep` to let the Finder build the desktop database. Needs `DISK_WRITABLE=1` (default).
+- `--disk-out FILE`: write the image as modified during the run (flash + PSRAM overlay, default pool) to FILE at exit, e.g. to inspect what the Mac saved. The disk is writable by default (`main/mac_disk_overlay.c`: block copy-on-write overlay in PSRAM, lost at power-off; `make EXTRA_DEFS=-DDISK_WRITABLE=0` restores the read-only volume, `-DDISK_OVERLAY_KB=N` sets the pool, default 384 Classic / 256 LC II). The emulator logs `diskov:` usage lines (blocks used / pool) on writes, at Classic shutdown and at exit.
 - `--stop-pc LO-HI` (TRACE=1 only): exit as soon as the 24-bit PC enters the hex range LO-HI (or a single address), so `trace_ring.txt` holds the 4096 instructions leading there.
 - `--cpu 68000|68020|68030`: after `mac_emu_init()`, set the CPU type and pulse reset again. Use this to try a CPU type without editing `mac_emulator.c`.
 - `--tap F`: hold the touch panel at a fixed point from frame F for 300 frames (a tap; repeatable).
@@ -87,7 +88,7 @@ make BUILD=build_prof TRACE=1 -j16
 
 The hook makes the host 4-5x slower (LC II ~1800 frames/s, Classic ~3500).
 
-Every run also prints `H host: ... EVQ-BAD` if the event queue head/tail ($014C/$0150) points into $00-$FF, and `H host: F... drive 1 diskInPlace $xx -> $yy` when the floppy's DrvSts changes (negative values = ejected), and `H host: F... CurApName "..."` when the current application changes (`"Finder"` = boot-to-Finder frame). Every 3000 frames it prints `H host: F... Time $xxxxxxxx` (the Mac clock at $20C; it should advance by 50 = 3000/60). The Classic build's fixed mouse EvQEl buffers at $C0/$D8 trigger EVQ-BAD by design after a click.
+Every run also prints `H host: ... EVQ-BAD` if the event queue head/tail ($014C/$0150) points into $00-$FF, and `H host: F... drive 1 diskInPlace $xx -> $yy` when the floppy's DrvSts changes (negative values = ejected), and `H host: F... CurApName "..."` when the current application changes (`"Finder"` = boot-to-Finder frame). Every 3000 frames it prints `H host: F... Time $xxxxxxxx` (the Mac clock at $20C; it should advance by 50 = 3000/60). The Classic build posts clicks into the OS's own event buffer (`CLASSIC_MOUSE_POSTEVENT=1`, default), so EVQ-BAD should never appear; with `EXTRA_DEFS=-DCLASSIC_MOUSE_POSTEVENT=0` the old fixed EvQEl buffers at $C0/$D8 trigger it by design after a click. EVQ-BAD prints at most 10 times; CurApName changes at most 200 times (a foreground app that is not background-capable makes it alternate with the Finder's background time).
 
 `make EXTRA_DEFS="-DMAC_IDLE_FF=0 -DMAC_V8_CYCLE_SCALE=1"` adds compile definitions, e.g. to A/B the idle fast-forward and the V8 cycle scale (see `main/mac_emulator.h`; with both off the core behaves exactly as before them). The real-time frame throttle (`MAC_FRAME_THROTTLE`) defaults to off on the host. The emulator logs an `IDLE-FF:` line with each `SPEED` report (share of CPU cycles skipped, number of fast-forwards per detector).
 
