@@ -105,7 +105,11 @@ Higher SPI clocks are often possible on these shields — measure.
 - [ ] **R0. Identify the hardware**: Pi model, shield model/controller, touch
       type, pin mapping; set up `arm-none-eabi-gcc` + Circle (or decide on a
       from-scratch runtime).
-- [ ] **R1. Hello, display**: Circle sample that initialises the ILI9486 over
+- [ ] **R1. Hello, display** (also identifies the controller: on these boards the
+      ILI9486/ILI9488 is chip-on-glass and not visible; the XPT2046 on the back is
+      the touch chip. 74HC4094/74HC595/74HC245 chips on the back ⇒ the classic
+      "3.5inch RPi LCD (A)" design: ILI9486 behind shift registers, write-only,
+      16-bit words. Try the ILI9486 init first, then ILI9488 if the image is wrong): Circle sample that initialises the ILI9486 over
       SPI and fills 480×320 test patterns; measure the achievable SPI clock.
 - [ ] **R2. Touch**: XPT2046 reads, calibration (stored in `/mac/config.txt`),
       debug overlay of the touch point.
