@@ -11,11 +11,12 @@ in about a second instead of a flash cycle. Nothing in `main/` or
 | `shim/esp_log.h` | `ESP_LOGE/W/I` print `L (ms) tag: msg` to stderr or the `--log` file. D/V are compiled out. |
 | `shim/esp_attr.h` | `IRAM_ATTR`, `EXT_RAM_BSS_ATTR` and the other placement attributes become empty. |
 | `shim/esp_heap_caps.h` | `heap_caps_*` call `malloc`/`calloc`. Free size is reported as 4 MB. |
-| `shim/esp_timer.h`, `shim/esp_cpu.h` | Both read `CLOCK_MONOTONIC`. The cycle count is a 32-bit counter at a nominal 240 MHz, so PROFILE lines still make sense. |
+| `shim/esp_timer.h`, `shim/esp_cpu.h` | Both read `CLOCK_MONOTONIC` (`esp_timer` returns the virtual clock instead with `--vclock`). The cycle count is a 32-bit counter at a nominal 240 MHz, so PROFILE lines still make sense. |
 | `shim/freertos/*.h` | `taskYIELD()` maps to `host_frame_hook()` (see below). `xPortGetCoreID()` is 1. `vTaskDelay` does nothing. |
 | `display_stub.c` | `display_draw` captures strips into a 480x320 RGB565 buffer. `display_get_touch` plays back the `--tap` / `--swipe` scripts. |
 | `rom_blobs.S` | Uses `.incbin` to embed the ROM and disk under the same `_binary_Color_Classic_ROM_*` and `_binary_OS_750_boot_dsk_*` symbols that EMBED_FILES creates. |
 | `host_main.c` | Handles the CLI and per-frame hook, writes PNGs with no dependencies, dumps RAM and reports speed. |
+| `host_prof.c` | Instruction profiler (`make TRACE=1`, `--profile-*`): A-line trap, code-region and interrupt attribution. |
 
 The compile definitions match `main/CMakeLists.txt`: `MAC_ROM_LC_II=1`
 (Color-Classic.ROM) and `HAS_DISK_IMAGE=1`. The build also adds
@@ -63,8 +64,29 @@ Options:
 - `--tap F`: hold the touch panel at a fixed point from frame F for 300 frames (a tap; repeatable).
 - `--swipe F:dx:dy[:N]`: hold the touch from frame F for N frames (default 2000), moving it so the cursor travels exactly (dx, dy) screen pixels (both builds position the cursor 1:1, no acceleration). The point rests 400 frames at each end so the first and last polls see the exact endpoints. A `--tap` that ends a few hundred frames before a swipe makes it a tap-then-drag (button held). Leave a gap of ~200 frames between gestures: the emulator polls touch every 16 ms of wall clock (about 100 host frames), so shorter gaps can merge two gestures. A touch that starts within 400 ms (~4000 host frames) after a tap is a tap-then-drag, so leave >5000 frames after a tap that should stay a plain click. Example (LC II/Color Classic, cursor starts at (15,15); opens View and picks "by Name", then selects the Trash): `--swipe 21000:115:-6:2000 --tap 23500 --swipe 24100:0:56:3000 --swipe 29000:310:33:2500 --tap 32000 --frames 36000`. Touch is sampled inline (`TOUCH_SAMPLER_TASK=0`, `main/mac_touch.c`); the ESP32 uses a sampler task.
 - `--watch ADDR` (TRACE=1): print the PC each time RAM byte ADDR (hex) changes (from `--stop-from` on).
+- `--vclock US`: virtual clock. `esp_timer_get_time()` returns `frames * US` microseconds instead of wall time, so touch polling and tap/drag classification no longer depend on host speed (the profiler slows the host 4-5x, which would otherwise turn taps into holds). `--vclock 120` matches the default build's ~8300 frames/s, so gesture scripts written for real time keep working. The speed line at exit still uses the real clock.
+- `--profile-from F`, `--profile-to T`, `--profile-out FILE`, `--profile-top N` (TRACE=1): profile the instructions executed in frames [F, T) and print a report at exit (stderr and FILE). Any of these options turns the profiler on; N is the number of rows per table (default 25).
 
-Every run also prints `H host: ... EVQ-BAD` if the event queue head/tail ($014C/$0150) points into $00-$FF, and `H host: F... drive 1 diskInPlace $xx -> $yy` when the floppy's DrvSts changes (negative values = ejected).
+## Profiler (`host_prof.c`)
+
+`host_trace_hook()` calls `prof_instr(pc)` before every instruction. It reads the opcode straight from the RAM array or the embedded ROM blob and never calls `m68k_read_memory_*`, so the emulation is unchanged (only touch timing depends on host speed, hence `--vclock`). The report contains:
+
+- Instructions and Musashi cycles per frame. The cycles of an instruction are the drop in `m68ki_remaining_cycles` up to the next hook, exception processing included.
+- **Context**: share of instructions inside interrupt handlers (from the PC reaching an autovector target at VBR+$64..$7C until SP rises above the entry SP, i.e. the RTE), per level; share run with the SR interrupt mask >= 1; share outside any trap.
+- **A-line traps**: an `$Axxx` opcode pushes {trap, PC+2, SP}. The entry pops when the PC returns to PC+2 with SP at or above the saved SP, or as soon as SP rises above it (autopop, unwinds). *Inclusive* counts every distinct trap on the stack (nested traps count in each); *self* counts only the innermost one. Traps called inside an interrupt are charged to the interrupt, not the trap it interrupted. OS traps are keyed by number (flag bits dropped), toolbox traps without the autopop bit. Each row shows the raw trap word, the current trap-table entry ($400 OS / $E00 toolbox) and the top call sites. Unknown names print as `?`.
+- **Code regions**: 4 KB pages by ROM address (ROM file offset + $A00000 on V8, + $400000 on the Classic) or RAM address, with the three hottest PCs of each page. `tools/dis68k.py` can disassemble those PCs from the ROM or a `--dump-ram` image.
+
+```bash
+make BUILD=build_prof TRACE=1 -j16
+./build_prof/macemu --vclock 120 --frames 20000 --shot-every 0 \
+    --profile-from 12000 --profile-to 20000 --profile-out prof_idle.txt   # Finder idle
+```
+
+The hook makes the host 4-5x slower (LC II ~1800 frames/s, Classic ~3500).
+
+Every run also prints `H host: ... EVQ-BAD` if the event queue head/tail ($014C/$0150) points into $00-$FF, and `H host: F... drive 1 diskInPlace $xx -> $yy` when the floppy's DrvSts changes (negative values = ejected), and `H host: F... CurApName "..."` when the current application changes (`"Finder"` = boot-to-Finder frame). Every 3000 frames it prints `H host: F... Time $xxxxxxxx` (the Mac clock at $20C; it should advance by 50 = 3000/60). The Classic build's fixed mouse EvQEl buffers at $C0/$D8 trigger EVQ-BAD by design after a click.
+
+`make EXTRA_DEFS="-DMAC_IDLE_FF=0 -DMAC_V8_CYCLE_SCALE=1"` adds compile definitions, e.g. to A/B the idle fast-forward and the V8 cycle scale (see `main/mac_emulator.h`; with both off the core behaves exactly as before them). The real-time frame throttle (`MAC_FRAME_THROTTLE`) defaults to off on the host. The emulator logs an `IDLE-FF:` line with each `SPEED` report (share of CPU cycles skipped, number of fast-forwards per detector).
 
 `make M32=1` builds a 32-bit binary, which matches the ESP32's 32-bit `long`
 and pointer sizes. It needs `gcc-multilib`.

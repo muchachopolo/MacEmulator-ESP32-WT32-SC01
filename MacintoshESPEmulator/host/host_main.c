@@ -29,10 +29,20 @@ static const char *opt_out = "out";
 static int   opt_cpu = 0;             /* 0 = keep what mac_emu_init() chose */
 static long  frames = 0;
 static int64_t t_start_us;
+static long  opt_vclock = 0;          /* --vclock US: virtual clock, US microseconds per frame */
+int64_t host_vclock_us = -1;          /* read by shim/esp_timer.h; -1 = real clock */
+
+/* Wall clock that ignores --vclock (speed report, log timestamps). */
+static int64_t real_time_us(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
 
 uint32_t esp_log_timestamp(void)
 {
-    return (uint32_t)((esp_timer_get_time() - t_start_us) / 1000);
+    return (uint32_t)((real_time_us() - t_start_us) / 1000);
 }
 
 void vTaskDelay(TickType_t ticks) { (void)ticks; }
@@ -154,6 +164,7 @@ extern int host_nswipes;
 void host_frame_hook(void)
 {
     frames++;
+    if (opt_vclock > 0) host_vclock_us = (int64_t)frames * opt_vclock;
     /* Event queue sanity: EvQHdr.qHead/qTail ($014C/$0150) must never
      * point into the vector table ($00-$FF), as the old Classic-style
      * mouse posting at $C0/$D8 did on V8. */
@@ -173,6 +184,22 @@ void host_frame_hook(void)
                     fprintf(stderr, "H host: F%ld drive 1 diskInPlace $%02X -> $%02X\n", frames, dip, v);
                 dip = v;
             }
+            /* CurApName ($910, Pascal string): boot-to-Finder marker */
+            static char apn[33] = "?";
+            int al = r[0x910];
+            if (al < 32) {
+                char cur[33];
+                memcpy(cur, r + 0x911, al);
+                cur[al] = 0;
+                if (strcmp(cur, apn) != 0) {
+                    fprintf(stderr, "H host: F%ld CurApName \"%s\"\n", frames, cur);
+                    strcpy(apn, cur);
+                }
+            }
+            /* Time ($20C, seconds since 1904): should advance 1 per 60 frames */
+            if (frames % 3000 == 0)
+                fprintf(stderr, "H host: F%ld Time $%08X\n", frames,
+                        (unsigned)((r[0x20C] << 24) | (r[0x20D] << 16) | (r[0x20E] << 8) | r[0x20F]));
             if ((h && h < 0x100) || (t && t < 0x100)) {
                 evq_bad++;
                 fprintf(stderr, "H host: F%ld EVQ-BAD qHead=$%08X qTail=$%08X\n",
@@ -187,6 +214,13 @@ void host_frame_hook(void)
 }
 
 #ifdef HOST_TRACE
+/* host_prof.c */
+extern long prof_from, prof_to;
+extern const char *prof_out;
+extern int prof_enabled, prof_top;
+void prof_instr(uint32_t pc);
+void prof_report(void);
+
 /* Per-instruction trace (make TRACE=1): first opt_trace instructions go to
  * opt_trace_file; a ring of the last TRACE_RING is dumped at exit. */
 #define TRACE_RING 4096
@@ -203,6 +237,7 @@ static long watch_n;
 
 void host_trace_hook(unsigned int pc)
 {
+    if (prof_enabled) prof_instr(pc);
     if (opt_watch && watch_n < 200 && frames >= opt_stop_from) {
         static int last = -1;
         uint8_t *r = mac_mem_get_ram();
@@ -263,8 +298,9 @@ static void at_exit(void)
 {
 #ifdef HOST_TRACE
     trace_dump_ring();
+    prof_report();
 #endif
-    double secs = (esp_timer_get_time() - t_start_us) / 1e6;
+    double secs = (real_time_us() - t_start_us) / 1e6;
     if (secs <= 0) secs = 1e-9;
     double fps = frames / secs;
     fprintf(stderr, "H host: %ld frames in %.2f s = %.1f frames/s = %.0f%% Mac real-time (60 fps)\n",
@@ -303,7 +339,13 @@ static void usage(const char *argv0)
         "  --trace N       (TRACE=1) first N instructions to trace.txt; ring of last 4096 -> trace_ring.txt\n"
         "  --stop-pc LO-HI (TRACE=1) exit (dumping trace_ring.txt) when PC first enters hex range\n"
         "  --stop-from F   (TRACE=1) only arm --stop-pc from frame F on\n"
-        "  --watch ADDR    (TRACE=1) report the PC whenever RAM byte ADDR (hex) changes\n", argv0);
+        "  --watch ADDR    (TRACE=1) report the PC whenever RAM byte ADDR (hex) changes\n"
+        "  --profile-from F / --profile-to F  (TRACE=1) profile instructions in frames [F, T)\n"
+        "                  (either option turns the profiler on; report printed at exit)\n"
+        "  --profile-out FILE (TRACE=1) also write the profile report to FILE\n"
+        "  --profile-top N (TRACE=1) rows per profile table (default 25)\n"
+        "  --vclock US     virtual clock: esp_timer_get_time() = frames * US (us), so touch\n"
+        "                  polling and gesture timing do not depend on host speed\n", argv0);
 }
 
 int main(int argc, char **argv)
@@ -316,6 +358,7 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--out") && v)        { opt_out = v; i++; }
         else if (!strcmp(a, "--dump-ram") && v)   { opt_dump_ram = v; i++; }
         else if (!strcmp(a, "--cpu") && v)       { opt_cpu = atoi(v); i++; }
+        else if (!strcmp(a, "--vclock") && v)    { opt_vclock = atol(v); host_vclock_us = 0; i++; }
         else if (!strcmp(a, "--swipe") && v) {
             struct host_swipe w = { 0, 2000, 0, 0 };
             if (sscanf(v, "%ld:%d:%d:%ld", &w.f, &w.dx, &w.dy, &w.n) < 3 || w.n < 1) {
@@ -332,6 +375,10 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--trace") && v)     { opt_trace = atol(v); i++; }
         else if (!strcmp(a, "--trace-file") && v) { opt_trace_file = v; i++; }
         else if (!strcmp(a, "--stop-from") && v) { opt_stop_from = atol(v); i++; }
+        else if (!strcmp(a, "--profile-from") && v) { prof_from = atol(v); prof_enabled = 1; i++; }
+        else if (!strcmp(a, "--profile-to") && v)   { prof_to = atol(v); prof_enabled = 1; if (prof_from < 0) prof_from = 0; i++; }
+        else if (!strcmp(a, "--profile-top") && v)  { prof_top = atoi(v); i++; }
+        else if (!strcmp(a, "--profile-out") && v)  { prof_out = v; prof_enabled = 1; if (prof_from < 0) prof_from = 0; i++; }
         else if (!strcmp(a, "--watch") && v)     { opt_watch = strtoul(v, NULL, 16) & 0x1FFFFF; i++; }
         else if (!strcmp(a, "--stop-pc") && v) {
             char *e; opt_stop_lo = strtoul(v, &e, 16);
@@ -346,7 +393,7 @@ int main(int argc, char **argv)
         }
         else { usage(argv[0]); return 2; }
     }
-    t_start_us = esp_timer_get_time();
+    t_start_us = real_time_us();
     if (opt_shot_every > 0) mkdir(opt_out, 0755);
 
     atexit(at_exit);

@@ -7,3 +7,6 @@
 !/*.c
 !/*.S
 !/shim/
+!/prof_results/
+/prof_results/*
+!/prof_results/*_gestures.txt

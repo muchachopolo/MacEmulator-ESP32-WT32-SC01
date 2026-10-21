@@ -8,7 +8,7 @@
 
 ROOT     := ..
 ROM_DIR  ?= $(abspath $(ROOT)/../ROM)
-BUILD    := build$(if $(TRACE),_trace,)
+BUILD    ?= build$(if $(TRACE),_trace,)
 CC       ?= gcc
 
 # Mirror main/CMakeLists.txt: ROM_NAME "Color-Classic.ROM" -> MAC_ROM_LC_II=1,
@@ -32,7 +32,7 @@ endif
 
 ARCH     := $(if $(M32),-m32,)
 OPT      ?= -O2 -g
-DEFS     := -DHAS_DISK_IMAGE=$(HAS_DISK_IMAGE) -DMAC_ROM_LC_II=$(MAC_ROM_LC_II) -DMAC_V8_CUDA=$(MAC_V8_CUDA) -DHOST_BUILD=1 $(if $(TRACE),-DHOST_TRACE=1,)
+DEFS     := -DHAS_DISK_IMAGE=$(HAS_DISK_IMAGE) -DMAC_ROM_LC_II=$(MAC_ROM_LC_II) -DMAC_V8_CUDA=$(MAC_V8_CUDA) -DHOST_BUILD=1 $(if $(TRACE),-DHOST_TRACE=1,) $(EXTRA_DEFS)
 INCS     := -Ishim -I$(ROOT)/main -I$(ROOT)/components/musashi -I$(ROOT)/components/display/include
 CFLAGS   := $(ARCH) $(OPT) -std=gnu17 -fno-strict-aliasing $(DEFS) $(INCS)
 WARN     := -Wall -Wno-unused-variable -Wno-unused-function -Wno-unused-but-set-variable
@@ -44,7 +44,7 @@ MUSASHI_SRCS := m68kcpu.c m68kops.c softfloat/softfloat.c
 
 OBJS := $(addprefix $(BUILD)/main/,$(CORE_SRCS:.c=.o)) \
         $(addprefix $(BUILD)/musashi/,$(MUSASHI_SRCS:.c=.o)) \
-        $(BUILD)/host_main.o $(BUILD)/display_stub.o $(BUILD)/rom_blobs.o
+        $(BUILD)/host_main.o $(BUILD)/host_prof.o $(BUILD)/display_stub.o $(BUILD)/rom_blobs.o
 
 SHIMS := $(wildcard shim/*.h shim/freertos/*.h)
 
