@@ -99,7 +99,7 @@ agent edits can't leak in; abort on "Hash of data verified" missing.
       mac_emulator.h). Host: level-1 entries 14.0 -> 1.2 /frame (boot 9.8 -> 1.1); Finder
       idle 3744 -> 3629 instr/frame, 49.2k -> 45.7k cycles/frame. **A/B on the board.**
 
-## Step 2c — Done 2026-10-21 (Classic polish + custom disk; NOT yet committed)
+## Step 2c — Done 2026-10-21 (Classic polish + custom disk)
 
 - [x] Classic boot screens centred on 480×320 (happy Mac icon immediates, welcome/DSAlert rect
       rewrite at $40155E; shutdown box follows). Remaining 512-constants: sad-Mac screen
@@ -218,6 +218,58 @@ Hackaday once polished):
 | Hackaday.io project page + tip to Hackaday | They feature "classic computer on a microcontroller" builds |
 | Show HN | Technical write-up (68030 on ESP32, native 480×320 ROM patch, host harness) |
 | YouTube / Mastodon (e.g. oldbytes.space) | 1–2 min boot + touch demo video |
+
+## Step 6 — External hardware: SD card, keyboard, joystick, Bluetooth, Wi-Fi (planned 2026-10-21)
+
+Goal: more disk space and persistent saves, real input devices, and room in flash
+for the Bluetooth/Wi-Fi stacks. Prerequisite from the user: **the expansion
+header pinout** (photo or datasheet table) and the exact modules (SD module or
+board revision with a slot; keyboard model — "SPI keyboard", possibly I²C like
+CardKB/BBQ10; joystick type — analog, digital or I²C).
+
+Facts to keep in mind:
+- The ESP32 boots its firmware only from the internal 4 MB flash; the **Mac** can
+  boot from a disk image stored on SD (the firmware stays in flash).
+- The WT32-SC01 v3.4 (ESP32) most likely has **no SD slot** (the ESP32-S3
+  "WT32-SC01 Plus" has one) — verify on the board. A micro-SD module in SPI mode
+  can share the LCD bus (MOSI 13, CLK 14) and needs **2 extra GPIOs** (MISO, CS).
+  SDMMC native mode conflicts with the LCD pins (14/15) — use SPI.
+- The board's USB-C goes to a CH340 USB-UART; the ESP32 has no USB host, so USB
+  keyboards need an adapter (CH9350L USB→UART module, 1 GPIO) or Bluetooth.
+- I²C devices (keyboard/joystick modules) can share the touch bus (SDA 18, SCL 19,
+  touch at 0x38) — no extra pins.
+
+Steps:
+- [ ] 6a. **SD card storage** (biggest win):
+      - FAT-formatted card; mount with ESP-IDF `esp_vfs_fat_sdspi_mount` on the
+        shared SPI host (coordinate with the esp_lcd SPI device; separate CS).
+      - Disk images as files (`/sd/*.dsk`); the .Sony paths (Classic DM
+        intercepts, `mac_v8disk.c`) and `mac_disk_overlay.c` read blocks from the
+        file instead of the embedded flash image (keep a small PSRAM block cache;
+        SPI SD ~1-3 MB/s, ms latency per block).
+      - **Persistent writes** to the SD file (write-through or write-back with
+        flush at Shut Down/periodic; replaces writable Level 2 in flash).
+      - Optional: ROMs from SD too; boot-time selection (config file on the card,
+        or touch menu) of ROM + disk; keep the embedded floppy as fallback.
+      - Larger volumes: the floppy path already mounts 2880K; test bigger HFS
+        volumes through .Sony; if the System insists on floppy limits, implement
+        the SCSI hard-disk target (Step 4) on top of the SD file.
+      - Flash then holds only code (~1.1 MB): ~2.9 MB freed (repartition: smaller
+        app partition + optional storage partition).
+- [ ] 6b. **Keyboard emulation core** (needed by every input option): ADB
+      keyboard in the Egret HLE (LC II, address 2) and in the Classic ADB path;
+      Mac key codes + modifiers; a test input over the USB serial console.
+- [ ] 6c. **Physical keyboard + joystick** on the expansion header (or I²C bus):
+      driver per module feeding 6b; joystick mappable to arrow keys + fire
+      (keyboard games) or to mouse movement + button (mouse games).
+- [ ] 6d. **Bluetooth** (needs 6a's flash space): BLE/Classic HID host for
+      wireless keyboard, mouse and gamepads (no pins). Budget: internal RAM for the
+      controller (~50-100 KB), some IRAM (53 KB free today); enable only when used;
+      measure emulator slowdown (shared 32 KB cache) on the board.
+- [ ] 6e. **Wi-Fi** (needs 6a): web page to upload `.dsk`/apps to the SD card and
+      choose the boot disk; NTP clock for the Mac RTC; Wi-Fi buffers in PSRAM
+      (`CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP` already set). Off by default.
+- Order: 6a → 6b → 6c and/or 6d → 6e. Pin budget decides 6c vs 6d for input.
 
 ## Ground rules
 
