@@ -6,11 +6,20 @@
 #   gcc -o m68kmake m68kmake.c
 #   ./m68kmake . m68k_in.c
 
+# ESP32 A/B switch: place m68k_execute + the 128 hottest opcode handlers in
+# IRAM (hot_iram.lf, ~17KB). OFF by default; flip to ON to benchmark.
+set(MUSASHI_HOT_IRAM OFF)
+set(MUSASHI_LDFRAGMENTS "")
+if(MUSASHI_HOT_IRAM)
+    set(MUSASHI_LDFRAGMENTS "hot_iram.lf")
+endif()
+
 # Register the component first (required for ESP-IDF build system)
 idf_component_register(
     SRCS "m68kcpu.c" "m68kops.c" "softfloat/softfloat.c"
     INCLUDE_DIRS "."
     REQUIRES log
+    LDFRAGMENTS ${MUSASHI_LDFRAGMENTS}
 )
 
 # Verify generated files exist

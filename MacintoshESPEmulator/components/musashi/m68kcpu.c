@@ -943,6 +943,51 @@ void m68k_set_cpu_type(unsigned int cpu_type)
 
 /* Execute some instructions until we use up num_cycles clock cycles */
 /* ASG: removed per-instruction interrupt checks */
+#if M68K_OP_INDEX
+#include <esp_attr.h>
+#include <stdlib.h>
+#include <stdint.h>
+#define M68K_OP_INDEX_MAX 2048   /* 1968 (handler,cycles) pairs for every CPU type */
+EXT_RAM_BSS_ATTR static unsigned short m68ki_op_index[0x10000];
+static void (*m68ki_op_fn[M68K_OP_INDEX_MAX])(void);
+static unsigned char m68ki_op_cyc[M68K_OP_INDEX_MAX];
+static const unsigned char *m68ki_op_index_for;   /* cycle table it was built from */
+
+/* (handler, cycles) pairs are unique per index; built whenever the active
+ * cycle table changes (m68k_set_cpu_type), checked once per m68k_execute. */
+static void m68ki_build_op_index(void)
+{
+	const unsigned char *cyc = CYC_INSTRUCTION;
+	enum { HB = 8192 };
+	unsigned short *hash = calloc(HB, sizeof(unsigned short)); /* idx+1, 0 = empty */
+	unsigned n = 0;
+	for (unsigned op = 0; op < 0x10000; op++) {
+		void (*fn)(void) = m68ki_instruction_jump_table[op];
+		unsigned char c = cyc[op];
+		unsigned h = ((unsigned)(uintptr_t)fn * 2654435761u ^ c * 40503u) & (HB - 1);
+		for (;;) {
+			unsigned e = hash ? hash[h] : 0;
+			if (e == 0) {
+				if (n >= M68K_OP_INDEX_MAX || !hash) { /* cannot index: fall back */
+					free(hash); m68ki_op_index_for = NULL; return;
+				}
+				m68ki_op_fn[n] = fn; m68ki_op_cyc[n] = c;
+				hash[h] = (unsigned short)(n + 1);
+				m68ki_op_index[op] = (unsigned short)n++;
+				break;
+			}
+			if (m68ki_op_fn[e - 1] == fn && m68ki_op_cyc[e - 1] == c) {
+				m68ki_op_index[op] = (unsigned short)(e - 1);
+				break;
+			}
+			h = (h + 1) & (HB - 1);
+		}
+	}
+	free(hash);
+	m68ki_op_index_for = cyc;
+}
+#endif
+
 int m68k_execute(int num_cycles)
 {
 	/* eat up any reset cycles */
@@ -954,6 +999,11 @@ int m68k_execute(int num_cycles)
 		return rc;
 	}
 
+#if M68K_OP_INDEX
+	if (m68ki_op_index_for != CYC_INSTRUCTION)
+		m68ki_build_op_index();
+	const int use_index = (m68ki_op_index_for != NULL);
+#endif
 	/* Set our pool of clock cycles available */
 	SET_CYCLES(num_cycles);
 	m68ki_initial_cycles = num_cycles;
@@ -967,7 +1017,9 @@ int m68k_execute(int num_cycles)
 		/* Return point if we had an address error */
 		m68ki_set_address_error_trap(); /* auto-disable (see m68kcpu.h) */
 
+#if M68K_EMULATE_BUS_ERROR
 		m68ki_check_bus_error_trap();
+#endif
 
 		/* Main loop.  Keep going until we run out of clock cycles */
 		do
@@ -985,15 +1037,26 @@ int m68k_execute(int num_cycles)
 			/* Record previous program counter */
 			REG_PPC = REG_PC;
 
+#if M68K_EMULATE_BUS_ERROR
 			/* Record previous D/A register state (in case of bus error) */
 			for (i = 15; i >= 0; i--){
 				REG_DA_SAVE[i] = REG_DA[i];
 			}
+#endif
 
 			/* Read an instruction and call its handler */
 			REG_IR = m68ki_read_imm_16();
+#if M68K_OP_INDEX
+			if (use_index) {
+				unsigned ix = m68ki_op_index[REG_IR];
+				m68ki_op_fn[ix]();
+				USE_CYCLES(m68ki_op_cyc[ix]);
+			} else
+#endif
+			{
 			m68ki_instruction_jump_table[REG_IR]();
 			USE_CYCLES(CYC_INSTRUCTION[REG_IR]);
+			}
 
 			/* Trace m68k_exception, if necessary */
 			m68ki_exception_if_trace(); /* auto-disable (see m68kcpu.h) */

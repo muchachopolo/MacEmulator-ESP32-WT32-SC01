@@ -443,7 +443,10 @@ typedef uint32 uint64;
 #else
 	#define CPU_TYPE_IS_010(A)         0
 	#define CPU_TYPE_IS_010_PLUS(A)    CPU_TYPE_IS_EC020_PLUS(A)
-	#define CPU_TYPE_IS_010_LESS(A)    CPU_TYPE_IS_EC020_LESS(A)
+	/* Must be exact: the EC020_LESS fallback is the constant 1 whenever 020
+	 * emulation is on, which made 020/030 decode indexed EAs (full-format
+	 * extension words) and build exception frames the 68000 way. */
+	#define CPU_TYPE_IS_010_LESS(A)    ((A) & (CPU_TYPE_000 | CPU_TYPE_008 | CPU_TYPE_010))
 #endif
 
 #if M68K_EMULATE_020 || M68K_EMULATE_EC020
@@ -985,6 +988,7 @@ typedef struct
 	uint mmu_srp_aptr, mmu_srp_limit;
 	uint mmu_tc;
 	uint16 mmu_sr;
+	uint mmu_tt0, mmu_tt1;  /* 68030 transparent translation registers */
 
 	const uint8* cyc_instruction;
 	const uint8* cyc_exception;
@@ -1068,6 +1072,15 @@ static inline uint m68ki_read_imm_16(void)
 }
 #else
 	REG_PC += 2;
+#if M68K_INLINE_FETCH
+	{
+		uint a = (REG_PC - 2) & 0x00FFFFFF;
+		if (a < mac_fast_fetch_lim) {
+			const unsigned char *p = mac_fast_ram + a;
+			return (p[0] << 8) | p[1];
+		}
+	}
+#endif
 	return m68k_read_immediate_16(ADDRESS_68K(REG_PC-2));
 #endif /* M68K_EMULATE_PREFETCH */
 }
@@ -1113,6 +1126,15 @@ static inline uint m68ki_read_imm_32(void)
 	m68ki_set_fc(FLAG_S | FUNCTION_CODE_USER_PROGRAM); /* auto-disable (see m68kcpu.h) */
 	m68ki_check_address_error(REG_PC, MODE_READ, FLAG_S | FUNCTION_CODE_USER_PROGRAM); /* auto-disable (see m68kcpu.h) */
 	REG_PC += 4;
+#if M68K_INLINE_FETCH
+	{
+		uint a = (REG_PC - 4) & 0x00FFFFFF;
+		if (a < mac_fast_fetch_lim) {
+			const unsigned char *p = mac_fast_ram + a;
+			return ((uint)p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3];
+		}
+	}
+#endif
 	return m68k_read_immediate_32(ADDRESS_68K(REG_PC-4));
 #endif /* M68K_EMULATE_PREFETCH */
 }
@@ -1135,6 +1157,15 @@ static inline uint m68ki_read_8_fc(uint address, uint fc)
 	    address = pmmu_translate_addr(address);
 #endif
 
+#if M68K_INLINE_RAM
+	{
+		uint a = address & 0x00FFFFFF;
+		if (a < mac_fast_rd_lim) {
+			const unsigned char *p = mac_fast_ram + a;
+			return p[0];
+		}
+	}
+#endif
 	return m68k_read_memory_8(ADDRESS_68K(address));
 }
 static inline uint m68ki_read_16_fc(uint address, uint fc)
@@ -1148,6 +1179,15 @@ static inline uint m68ki_read_16_fc(uint address, uint fc)
 	    address = pmmu_translate_addr(address);
 #endif
 
+#if M68K_INLINE_RAM
+	{
+		uint a = address & 0x00FFFFFF;
+		if (a < mac_fast_rd_lim) {
+			const unsigned char *p = mac_fast_ram + a;
+			return (p[0] << 8) | p[1];
+		}
+	}
+#endif
 	return m68k_read_memory_16(ADDRESS_68K(address));
 }
 static inline uint m68ki_read_32_fc(uint address, uint fc)
@@ -1161,6 +1201,15 @@ static inline uint m68ki_read_32_fc(uint address, uint fc)
 	    address = pmmu_translate_addr(address);
 #endif
 
+#if M68K_INLINE_RAM
+	{
+		uint a = address & 0x00FFFFFF;
+		if (a < mac_fast_rd_lim) {
+			const unsigned char *p = mac_fast_ram + a;
+			return ((uint)p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3];
+		}
+	}
+#endif
 	return m68k_read_memory_32(ADDRESS_68K(address));
 }
 
@@ -1174,6 +1223,16 @@ static inline void m68ki_write_8_fc(uint address, uint fc, uint value)
 	    address = pmmu_translate_addr(address);
 #endif
 
+#if M68K_INLINE_RAM
+	{
+		uint a = address & 0x00FFFFFF;
+		if (a - 0xA20 < mac_fast_wr_span) {
+			unsigned char *p = mac_fast_ram + a;
+			p[0] = (unsigned char)value;
+			return;
+		}
+	}
+#endif
 	m68k_write_memory_8(ADDRESS_68K(address), value);
 }
 static inline void m68ki_write_16_fc(uint address, uint fc, uint value)
@@ -1187,6 +1246,16 @@ static inline void m68ki_write_16_fc(uint address, uint fc, uint value)
 	    address = pmmu_translate_addr(address);
 #endif
 
+#if M68K_INLINE_RAM
+	{
+		uint a = address & 0x00FFFFFF;
+		if (a - 0xA20 < mac_fast_wr_span) {
+			unsigned char *p = mac_fast_ram + a;
+			p[0] = (unsigned char)(value >> 8); p[1] = (unsigned char)value;
+			return;
+		}
+	}
+#endif
 	m68k_write_memory_16(ADDRESS_68K(address), value);
 }
 static inline void m68ki_write_32_fc(uint address, uint fc, uint value)
@@ -1200,6 +1269,17 @@ static inline void m68ki_write_32_fc(uint address, uint fc, uint value)
 	    address = pmmu_translate_addr(address);
 #endif
 
+#if M68K_INLINE_RAM
+	{
+		uint a = address & 0x00FFFFFF;
+		if (a - 0xA20 < mac_fast_wr_span) {
+			unsigned char *p = mac_fast_ram + a;
+			p[0] = (unsigned char)(value >> 24); p[1] = (unsigned char)(value >> 16);
+			p[2] = (unsigned char)(value >> 8);  p[3] = (unsigned char)value;
+			return;
+		}
+	}
+#endif
 	m68k_write_memory_32(ADDRESS_68K(address), value);
 }
 
