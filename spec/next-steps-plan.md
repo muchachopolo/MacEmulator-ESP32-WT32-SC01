@@ -109,6 +109,41 @@ measurement, and verify every replacement byte-for-byte on the host harness.
       MMU stub ever proves insufficient. ROM collection reference:
       https://github.com/macmade/Macintosh-ROMs (Apple copyright; user's call).
 
+## Step 5 — Publish for other fans (repo is public)
+
+Repo state found 2026-10-21: no top-level README.md and no LICENSE; vendor datasheet PDFs are
+committed (ST7796s.pdf, esp32-wrover-b_datasheet_en.pdf, WT32-SC01 datasheet, Getting Started
+guide); `origin/main` is at fbb47f5, so none of the recent work is on main; `ROM/` is correctly
+gitignored.
+
+Prepare the repo:
+- [ ] Merge `phase2-lc2-native` into `main` (PR or fast-forward) and push.
+- [ ] Write `README.md`: what it is plus a photo/GIF of the Finder on the board (the user
+      provides it); exact board (WT32-SC01 v3.4) and where to buy; build and flash steps
+      (`build.bat`, ESP-IDF v6.1); touch gestures; current speed and what works; known
+      limitations; link to `spec/next-steps-plan.md` and the host harness README.
+- [ ] ROM notice: users must supply their own `Classic.ROM` or `LC-II.ROM` and a System 7.5.3
+      boot disk, and the README says where they go. **Never publish prebuilt firmware**
+      (it embeds the Apple ROM and the disk image); releases are source-only.
+- [ ] Licence: MIT suggested (user to confirm). Keep Musashi's licence notice; credit Musashi,
+      MAME (V8/Egret references) and Mini vMac (screen-hack precedent).
+- [ ] Replace the committed datasheet PDFs with links to the vendors' pages.
+- [ ] GitHub topics: esp32, macintosh, 68k, emulator, wt32-sc01, classic-mac, system7.
+- [ ] Remove or neutralise `CLAUDE.md`'s machine-specific paths if they would confuse users
+      (or keep it as contributor notes).
+
+Where to share (suggested order: 68kMLA + r/VintageApple with a short video first, then
+Hackaday once polished):
+| Place | Why |
+|---|---|
+| 68kMLA forum (68kmla.org) | Main vintage Mac community; most interested audience |
+| Tinker Different forum | Retro Apple hardware tinkerers |
+| E-Maculation forum | Emulator enthusiasts (Mini vMac, Basilisk II); compatibility help |
+| Reddit: r/VintageApple, r/esp32, r/retrobattlestations | Wide reach; short video works best |
+| Hackaday.io project page + tip to Hackaday | They feature "classic computer on a microcontroller" builds |
+| Show HN | Technical write-up (68030 on ESP32, native 480×320 ROM patch, host harness) |
+| YouTube / Mastodon (e.g. oldbytes.space) | 1–2 min boot + touch demo video |
+
 ## Ground rules
 
 - Debug logic on the host harness first; flash only to confirm or to measure.
