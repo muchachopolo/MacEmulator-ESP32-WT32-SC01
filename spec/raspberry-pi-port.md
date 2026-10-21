@@ -38,6 +38,8 @@ Circle's USB stack.
 
 ## 2. How the Pi boots without an OS
 
+(Diagrams: [docs/learn/08-boot-explained.md](../docs/learn/08-boot-explained.md), part 3.)
+
 1. The GPU ROM reads the SD card's FAT partition and loads **`bootcode.bin`**,
    then **`start.elf`** + **`fixup.dat`** (Raspberry Pi firmware files).
 2. `start.elf` reads **`config.txt`** and loads **`kernel.img`** at `0x8000`.
