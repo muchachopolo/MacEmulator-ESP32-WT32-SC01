@@ -19,3 +19,9 @@ Build and SD card: as in [R1](../r1-display/README.md) (`make` → `kernel7.img`
    and pressure while touched. The grey cross-hairs are where the targets were:
    touching them should hit their centres. The red box bottom-left clears the
    screen.
+
+## Result (2026-10-21, AC-TFT35-V2.1)
+
+Works: all four targets accepted, drawing follows the stylus. Calibration:
+swap 1 (screen x = raw Y, screen y = raw X), left 3619, right 472, top 730,
+bottom 3443 — stored as `XPT2046_CAL_*` defaults in `../common/xpt2046.h`.

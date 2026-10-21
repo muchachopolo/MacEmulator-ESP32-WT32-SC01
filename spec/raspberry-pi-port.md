@@ -2,7 +2,7 @@
 
 Written 2026-10-21. Goal: run the same emulator core (Mac Classic and LC II)
 on a **Raspberry Pi without an operating system**, booting straight from the
-SD card, with a 3.5-inch SPI touch shield. Status: R0 and R1 done, R2 (touch) under test (2026-10-21).
+SD card, with a 3.5-inch SPI touch shield. Status: R0, R1 (display) and R2 (touch) done (2026-10-21); next R3.
 
 **User's hardware (2026-10-21):**
 - **Raspberry Pi 2 Model B v1.1 (2014)** — BCM2836, **4× ARM Cortex-A7 @ 900 MHz**
@@ -127,10 +127,12 @@ Higher SPI clocks are often possible on these shields — measure.
       `ports/rpi/common/ili9486.*`, `CILI9486::MaxClock`. A 20-line strip costs
       ~8.6 ms, so dirty-strip rendering keeps the cursor and menus responsive;
       smaller dirty rectangles are an R7 option.
-- [ ] **R2. Touch**: XPT2046 reads, calibration (stored in `/mac/config.txt`),
+- [x] **R2. Touch**: XPT2046 reads, calibration (stored in `/mac/config.txt`),
       debug overlay of the touch point. Test app `ports/rpi/r2-touch/` (driver
       `ports/rpi/common/xpt2046.*`: 1.95 MHz, median of 7, pressure Z): 4-target
       calibration (axis swap + linear), then drawing with raw X/Y/Z shown.
+      **Result:** works; swap 1, raw left 3619 / right 472 / top 730 / bottom
+      3443 at the 40-px-inset targets → `XPT2046_CAL_*` defaults.
 - [ ] **R3. Emulator core boots**: `ports/rpi1/` Makefile building `main/*.c`
       + Musashi with the shims; ROM and disk loaded from SD; render to the LCD;
       Classic boots to the Finder (compare screenshots/behaviour with the host
