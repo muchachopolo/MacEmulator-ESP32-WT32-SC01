@@ -8,7 +8,7 @@
 
 # ESP32 A/B switch: place m68k_execute + the 128 hottest opcode handlers in
 # IRAM (hot_iram.lf, ~17KB). OFF by default; flip to ON to benchmark.
-set(MUSASHI_HOT_IRAM OFF)
+set(MUSASHI_HOT_IRAM ON)
 set(MUSASHI_LDFRAGMENTS "")
 if(MUSASHI_HOT_IRAM)
     set(MUSASHI_LDFRAGMENTS "hot_iram.lf")

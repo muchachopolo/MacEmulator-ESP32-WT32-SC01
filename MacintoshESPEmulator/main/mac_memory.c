@@ -36,7 +36,7 @@ static uint32_t ram_mask = 0;       /* For mirroring: ram_size - 1 */
  * With M68K_INLINE_RAM they only serve ROM data, devices, low-memory writes
  * and alias/edge cases; ~2KB of IRAM. */
 #ifndef MAC_MEM_CALLBACK_IRAM
-#define MAC_MEM_CALLBACK_IRAM 0
+#define MAC_MEM_CALLBACK_IRAM 1
 #endif
 #if MAC_MEM_CALLBACK_IRAM
 #define MEM_CB_ATTR IRAM_ATTR
@@ -2054,6 +2054,9 @@ IRAM_ATTR unsigned int m68k_read_pcrelative_32(unsigned int address)
 int mac_int_ack_handler(int level)
 {
     (void)level;
+#if MAC_IDLE_FF
+    mac_idle_note_irq();
+#endif
     return M68K_INT_ACK_AUTOVECTOR;
 }
 

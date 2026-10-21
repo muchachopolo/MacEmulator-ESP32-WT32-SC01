@@ -127,6 +127,11 @@ static void via_update_irq(void)
      * the SR mask: the LC II TimeDBRA calibration at $A00800 then counts
      * 0 DBRAs and the boot dies on DIVU #0 at $A43A8C (Sad Mac 0F/0004). */
     via_update_cpu_irq();
+#elif CLASSIC_VIA_IRQ_NOW
+    /* Classic: same reason (see CLASSIC_VIA_IRQ_NOW in mac_emulator.h).
+     * m68k_set_irq() only latches the level; Musashi samples it between
+     * instructions, so this is safe from inside a VIA register access. */
+    m68k_set_irq((via.ifr & VIA_IRQ_ANY) ? M68K_IRQ_1 : M68K_IRQ_NONE);
 #endif
 }
 
@@ -166,7 +171,7 @@ void via_update_cpu_irq(void)
 #endif
 #define VIA_ECLOCK (MAC_ROM_LC_II || CLASSIC_VIA_ECLOCK)
 #if MAC_ROM_LC_II
-#define VIA_T_NOW(c) ((uint16_t)((c) - (uint16_t)((via.e_rem + m68k_cycles_run()) / 10)))
+#define VIA_T_NOW(c) ((uint16_t)((c) - (uint16_t)((via.e_rem + m68k_cycles_run() * MAC_CYCLE_SCALE) / 10)))  /* device cycles, see MAC_CYCLE_SCALE */
 #define VIA_T_LOAD(v) (v)
 #else
 #ifndef CLASSIC_VIA_INTERP

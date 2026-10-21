@@ -250,6 +250,119 @@ bool mac_emu_init(void)
     return true;
 }
 
+/* ------------------------------------------------------------------ */
+/* Idle fast-forward (MAC_IDLE_FF, see mac_emulator.h)                 */
+/*                                                                     */
+/* Two detectors, both off the hot path:                               */
+/*  1. Process Manager idle loop (System 7.x, RAM; LC II ~$2DC56,      */
+/*     Classic ~$214C0): the scheduler finds no runnable process and   */
+/*     executes   _Trap $ABF7 ; MOVE.L A4,D0 ; BEQ.W loop   (bytes     */
+/*     ABF7 200C 6700 FF64). Seen from mac_aline_hook() (A-line        */
+/*     exception path only). A pass is ~390 instructions (OSEventAvail,*/
+/*     $ABF7 -> PPC $A0DD) and its result can only change through an   */
+/*     interrupt (VBL -> Ticks, ADB/Egret -> events, Time Manager) or  */
+/*     the frame-end touch/disk updates. So when a whole pass ran with  */
+/*     neither (mac_idle_epoch unchanged since the previous $ABF7), the */
+/*     next pass would be identical: end the slice and fast-forward.    */
+/*  2. Tick-wait loops  CMP.L ($016A).W,Dn ; Bcc.S *-4  (ROM DragGrayRgn*/
+/*     LC II $A193E8, Classic $40C5C2; Delay etc.): checked on the PC  */
+/*     at the end of each slice. The loop only exits when an interrupt */
+/*     changes Ticks.                                                   */
+/* Fast-forward = advance device time (VIA/Egret, VBL) in fast_slice    */
+/* chunks, exactly as if the CPU had spun, until an interrupt above the */
+/* SR mask is pending or the frame budget is used up.                   */
+/* ------------------------------------------------------------------ */
+#if MAC_IDLE_FF
+static uint32_t mac_idle_epoch;         /* bumped by real interrupts + frame ends */
+static uint32_t ff_abf7_mark = 0xFFFFFFFF;
+static volatile bool ff_request;        /* set by mac_aline_hook */
+static bool ff_resume_armed;            /* CPU parked at ff_park_pc after an FF */
+static uint32_t ff_park_pc;
+static uint32_t ff_stat_skipped;        /* CPU cycles skipped (SPEED report) */
+static uint32_t ff_stat_count, ff_stat_abf7, ff_stat_tick;
+
+static inline uint16_t ff_peek16(uint32_t a)
+{
+    a &= 0xFFFFFF;
+    const uint8_t *r = mac_mem_get_ram();
+    uint32_t rs = mac_mem_get_ram_size();
+    if (r && a + 1 < rs) return (uint16_t)((r[a] << 8) | r[a + 1]);
+#if MAC_ROM_LC_II
+    uint32_t rb = 0xA00000;
+#else
+    uint32_t rb = 0x400000;
+#endif
+    uint32_t rsz = (uint32_t)(rom_end - rom_start);
+    if (a >= rb && a + 1 < rb + rsz)
+        return (uint16_t)((rom_start[a - rb] << 8) | rom_start[a - rb + 1]);
+    return 0;
+}
+
+/* Bcc.S *-4 (any condition except BRA/BSR), i.e. back to the CMP.L */
+static inline bool ff_is_bcc_back(uint16_t w)
+{
+    return (w & 0xF0FF) == 0x60FA && (w & 0x0E00) != 0;
+}
+
+/* PC sits in "CMP.L ($016A).W,Dn ; Bcc.S *-4" */
+static bool ff_ticks_wait_at(uint32_t pc)
+{
+    uint16_t w = ff_peek16(pc);
+    if ((w & 0xF1FF) == 0xB0B8)
+        return ff_peek16(pc + 2) == 0x016A && ff_is_bcc_back(ff_peek16(pc + 4));
+    if (ff_is_bcc_back(w))
+        return (ff_peek16(pc - 4) & 0xF1FF) == 0xB0B8 && ff_peek16(pc - 2) == 0x016A;
+    return false;
+}
+
+void mac_aline_hook(unsigned int trap_word, unsigned int trap_pc)
+{
+    ff_resume_armed = false;            /* the CPU has left the park point */
+    if (trap_word != 0xABF7 || !mac_post_boot) return;
+    trap_pc &= 0xFFFFFF;
+    if (ff_peek16(trap_pc + 2) != 0x200C || ff_peek16(trap_pc + 4) != 0x6700 ||
+        ff_peek16(trap_pc + 6) != 0xFF64)
+        return;                         /* $ABF7 from SystemTask etc.: not idle */
+    if (ff_abf7_mark == mac_idle_epoch) {
+        ff_request = true;
+        ff_stat_abf7++;
+        m68k_end_timeslice();
+    }
+    ff_abf7_mark = mac_idle_epoch;
+}
+
+/* Called from the interrupt-acknowledge callback. */
+void mac_idle_note_irq(void)
+{
+    /* Interrupts taken where an FF parked the CPU happen before the next
+     * idle pass starts, so that pass already sees their effects. */
+    if (ff_resume_armed &&
+        (m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF) == ff_park_pc)
+        return;
+#if MAC_ROM_LC_II
+    if (!via_irq_pending() && !v8video_irq_pending()) return;
+#else
+    if (!via_irq_pending()) return;     /* Classic: spurious re-takes of a cleared line */
+#endif
+    mac_idle_epoch++;
+}
+
+/* Highest interrupt level currently requested by the devices */
+static inline int ff_pending_level(void)
+{
+#if MAC_ROM_LC_II
+    if (v8video_irq_pending()) return 2;
+#endif
+    return via_irq_pending() ? 1 : 0;
+}
+#else
+void mac_aline_hook(unsigned int trap_word, unsigned int trap_pc)
+{
+    (void)trap_word; (void)trap_pc;
+}
+void mac_idle_note_irq(void) {}
+#endif /* MAC_IDLE_FF */
+
 void mac_emu_run(void *param)
 {
     (void)param;
@@ -269,8 +382,10 @@ void mac_emu_run(void *param)
      * (100-2000 cycles), and coarser ticks cause timer underflow misses that
      * corrupt interrupt timing — this was the root cause of the F8000 crash
      * (PC=$C80584, SP=$000000) seen with fast_slice=40000. */
-    const int normal_slice = 1000;
-    const int fast_slice = 4000;
+    /* In CPU cycles; the device-time granularity (what the VIA limit above
+     * is about) stays 1000/4000 device cycles at any MAC_CYCLE_SCALE. */
+    const int normal_slice = 1000 / MAC_CYCLE_SCALE;
+    const int fast_slice = 4000 / MAC_CYCLE_SCALE;
     const int disk_slice = 10;
 
     int frame_count = 0;
@@ -308,7 +423,7 @@ void mac_emu_run(void *param)
 
     while (1) {
         /* Execute one frame's worth of CPU cycles */
-        int cycles_remaining = MAC_CYCLES_PER_VBLANK;
+        int cycles_remaining = MAC_CPU_CYCLES_PER_FRAME;
         int total_executed = 0;
         bool vblank_fired = false;
 #if MAC_ROM_LC_II
@@ -338,6 +453,9 @@ void mac_emu_run(void *param)
             uint32_t t_exec0 = esp_cpu_get_cycle_count();
             int executed = m68k_execute(slice);
             uint32_t t_exec1 = esp_cpu_get_cycle_count();
+#if MAC_IDLE_FF
+            ff_resume_armed = false;
+#endif
             prof_exec_sum += (t_exec1 - t_exec0);
             cycles_remaining -= executed;
             total_executed += executed;
@@ -463,7 +581,7 @@ void mac_emu_run(void *param)
 
             /* Fire VBlank mid-frame so ROM dispatch loop can see CA1 in IFR
              * even if it reads ORA (which clears CA1) earlier in the loop */
-            if (!vblank_fired && total_executed >= MAC_CYCLES_PER_VBLANK / 2) {
+            if (!vblank_fired && total_executed >= MAC_CPU_CYCLES_PER_FRAME / 2) {
                 via_vblank();
 #if MAC_ROM_LC_II
                 v8video_vbl(true);
@@ -1429,7 +1547,7 @@ void mac_emu_run(void *param)
              * The ROM's .SONY driver uses VIA-based timeouts to detect
              * when a full track has been read.  Let the timeout fire
              * naturally so the driver exits its byte-reading loop. */
-            via_tick(executed);
+            via_tick(executed * MAC_CYCLE_SCALE);   /* device cycles */
 
             /* Check for VIA interrupt -> raise CPU IRQ level 1 */
 #if MAC_ROM_LC_II
@@ -1439,6 +1557,50 @@ void mac_emu_run(void *param)
                 m68k_set_irq(M68K_IRQ_1);
             } else {
                 m68k_set_irq(M68K_IRQ_NONE);
+            }
+#endif
+
+#if MAC_IDLE_FF
+            /* Idle fast-forward (see ff_* above). Device time advances in
+             * fast_slice chunks exactly as during a spin; the CPU resumes at
+             * the same PC once an interrupt it will take is pending. */
+            {
+                bool ff = ff_request;
+                ff_request = false;
+                if (!ff && mac_post_boot && cycles_remaining > 0 &&
+                    ff_ticks_wait_at(pc_slice)) {
+                    ff = true;
+                    ff_stat_tick++;
+                }
+                if (ff && cycles_remaining > 0 && mac_post_boot && !iwm_is_reading()) {
+                    int mask = (m68k_get_reg(NULL, M68K_REG_SR) >> 8) & 7;
+                    bool woke = false;
+                    ff_stat_count++;
+                    while (cycles_remaining > 0) {
+                        if (ff_pending_level() > mask) { woke = true; break; }
+                        int c = (cycles_remaining > fast_slice) ? fast_slice : cycles_remaining;
+                        cycles_remaining -= c;
+                        total_executed += c;
+                        ff_stat_skipped += c;
+                        via_tick(c * MAC_CYCLE_SCALE);
+                        if (!vblank_fired && total_executed >= MAC_CPU_CYCLES_PER_FRAME / 2) {
+                            via_vblank();
+#if MAC_ROM_LC_II
+                            v8video_vbl(true);
+#endif
+                            vblank_fired = true;
+                        }
+#if MAC_ROM_LC_II
+                        via_update_cpu_irq();
+#else
+                        m68k_set_irq(via_irq_pending() ? M68K_IRQ_1 : M68K_IRQ_NONE);
+#endif
+                    }
+                    if (woke || ff_pending_level() > mask) {
+                        ff_resume_armed = true;
+                        ff_park_pc = m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF;
+                    }
+                }
             }
 #endif
         }
@@ -3097,6 +3259,13 @@ void mac_emu_run(void *param)
                 ESP_LOGI(TAG, "SPEED: %d frames in %dms (mac=%dms) => %d%% real-time",
                          frames_done, wall_ms, mac_ms, speed_pct);
                 ESP_LOGI(TAG, "MACPC: %06X", m68k_get_reg(NULL, M68K_REG_PC));
+#if MAC_IDLE_FF
+                ESP_LOGI(TAG, "IDLE-FF: %u%% of CPU cycles skipped (%u FFs: %u idle-loop, %u tick-wait)",
+                         (unsigned)((uint64_t)ff_stat_skipped * 100 /
+                                    ((uint64_t)frames_done * MAC_CPU_CYCLES_PER_FRAME)),
+                         (unsigned)ff_stat_count, (unsigned)ff_stat_abf7, (unsigned)ff_stat_tick);
+                ff_stat_skipped = ff_stat_count = ff_stat_abf7 = ff_stat_tick = 0;
+#endif
 #if MAC_ROM_LC_II
                 extern uint32_t v8_iwm_reads;
                 ESP_LOGI(TAG, "IWMR: %lu reads", (unsigned long)v8_iwm_reads);
@@ -3263,8 +3432,34 @@ void mac_emu_run(void *param)
             }
         }
 
-        /* No frame rate limiter — run at maximum speed.
-         * Yield periodically to prevent watchdog timeout. */
+#if MAC_IDLE_FF
+        /* Frame-end updates (touch -> Mouse globals/events, V8 disk) can
+         * change what the idle loop sees: count them as an event. */
+        mac_idle_epoch++;
+#endif
+
+#if MAC_FRAME_THROTTLE
+        /* Real-time cap: at most one emulated frame per MAC_FRAME_US of wall
+         * clock. Only matters when frames are cheap (idle fast-forward); a
+         * frame that ran late is not caught up by more than ~100 ms. */
+        {
+            static int64_t thr_base;
+            static int64_t thr_frames;
+            int64_t now = esp_timer_get_time();
+            if (thr_base == 0) thr_base = now;
+            thr_frames++;
+            int64_t target = thr_base + thr_frames * MAC_FRAME_US;
+            if (now < target) {
+                int64_t ms = (target - now) / 1000;
+                if (ms > 0) vTaskDelay(pdMS_TO_TICKS(ms));
+            } else if (now - target > 100000) {
+                thr_base = now;
+                thr_frames = 0;
+            }
+        }
+#endif
+
+        /* Yield periodically to prevent watchdog timeout. */
         taskYIELD();
     }
 }

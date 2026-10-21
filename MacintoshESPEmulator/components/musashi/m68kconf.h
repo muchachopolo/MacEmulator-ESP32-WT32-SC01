@@ -31,6 +31,12 @@
 /* Forward declarations for Mac callback handlers */
 extern int mac_int_ack_handler(int level);
 extern void mac_reset_handler(void);
+/* A-line trap hook (mac_emulator.c): called on the A-line exception path
+ * only (not per instruction) with the trap word and its address. Used by
+ * the idle fast-forward (MAC_IDLE_FF) to spot the Process Manager idle
+ * loop. */
+extern void mac_aline_hook(unsigned int trap_word, unsigned int trap_pc);
+#define M68K_ALINE_HOOK(IR, PPC)    mac_aline_hook(IR, PPC)
 
 /* Use autovectored interrupts (matches Mac hardware) */
 #define M68K_EMULATE_INT_ACK        OPT_SPECIFY_HANDLER
@@ -101,7 +107,7 @@ extern void mac_reset_handler(void);
 #define M68K_INLINE_RAM             OPT_OFF  /* A/B 2026-10-21: suspected ESP32 I-cache thrash */
 #endif
 #ifndef M68K_INLINE_FETCH
-#define M68K_INLINE_FETCH           OPT_ON
+#define M68K_INLINE_FETCH           OPT_OFF
 #endif
 #if M68K_INLINE_RAM || M68K_INLINE_FETCH
 extern unsigned char *mac_fast_ram;

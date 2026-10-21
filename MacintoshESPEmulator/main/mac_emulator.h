@@ -36,6 +36,16 @@ extern "C" {
 #ifndef CLASSIC_NATIVE_LCD
 #define CLASSIC_NATIVE_LCD  1
 #endif
+
+/* Classic build: drive the CPU's level-1 IRQ line from every VIA IFR/IER
+ * change (as the V8 build does), not only at the end of each execution
+ * slice. With the line only lowered at slice end, the CPU re-took the
+ * already-cleared VIA interrupt each time a handler lowered the SR mask
+ * (~14 level-1 interrupts per frame instead of ~1-2). 0 = old behaviour,
+ * for board A/B. */
+#ifndef CLASSIC_VIA_IRQ_NOW
+#define CLASSIC_VIA_IRQ_NOW 1
+#endif
 #if CLASSIC_NATIVE_LCD && !MAC_ROM_LC_II
 #define MAC_VIS_WIDTH       480
 #define MAC_VIS_HEIGHT      320
@@ -53,6 +63,53 @@ extern "C" {
 /* Timing */
 #define MAC_VBLANK_HZ       60          /* VBlank rate ~60.15 Hz */
 #define MAC_CYCLES_PER_VBLANK (MAC_CPU_HZ / MAC_VBLANK_HZ) /* ~130,560 */
+
+/* Device clock vs CPU clock (V8 / LC II build).
+ * MAC_CYCLES_PER_VBLANK is the DEVICE time of one frame: VIA E clock
+ * (cycles/10), Egret, VBL.  The CPU gets MAC_CPU_CYCLES_PER_FRAME =
+ * MAC_CYCLES_PER_VBLANK / MAC_CYCLE_SCALE Musashi cycles per frame, and
+ * each executed CPU cycle advances device time by MAC_CYCLE_SCALE.
+ * Why: Musashi's 68030 timings average ~6.2 cycles/instruction vs ~12.8 for
+ * the 68000, so at the same 7.8336 MHz budget the LC II ran ~20,800
+ * instructions per tick vs ~10,200 on the Classic.  The UI is tick-paced
+ * (menu blink, drag, Delay, WaitNextEvent sleep), so that doubled the host
+ * work per tick.  Scale 2 = a 68030 at ~3.9 MHz: about the Classic's
+ * instruction throughput per tick, while timers, Ticks and the ROM's
+ * VIA-based calibrations (TimeDBRA etc.) stay on the real time scale.
+ * SWIM byte timing (mac_iwm.c) stays in CPU cycles on purpose (the CPU's
+ * view of byte arrival is unchanged).  1 = previous behaviour.
+ * The Classic build always uses 1. */
+#ifndef MAC_V8_CYCLE_SCALE
+#define MAC_V8_CYCLE_SCALE  2
+#endif
+#if MAC_ROM_LC_II
+#define MAC_CYCLE_SCALE     MAC_V8_CYCLE_SCALE
+#else
+#define MAC_CYCLE_SCALE     1
+#endif
+#define MAC_CPU_CYCLES_PER_FRAME (MAC_CYCLES_PER_VBLANK / MAC_CYCLE_SCALE)
+
+/* Idle fast-forward (mac_emulator.c): when the Mac is provably only waiting
+ * for an interrupt (Process Manager idle loop with no interrupt since the
+ * previous pass, or a "CMP.L Ticks,Dn / Bcc.S *-4" tick-wait loop), stop
+ * emulating the spin and advance device time (VIA/Egret/VBL) until an
+ * interrupt the CPU will take is pending, or the frame ends.
+ * 0 = off (A/B). */
+#ifndef MAC_IDLE_FF
+#define MAC_IDLE_FF         1
+#endif
+
+/* Real-time throttle: never run more than one frame per MAC_FRAME_US of
+ * wall clock (frames become cheap with MAC_IDLE_FF).  Off on the host
+ * harness so host runs stay fast. */
+#ifndef MAC_FRAME_THROTTLE
+#ifdef HOST_BUILD
+#define MAC_FRAME_THROTTLE  0
+#else
+#define MAC_FRAME_THROTTLE  1
+#endif
+#endif
+#define MAC_FRAME_US        16626       /* 60.15 Hz */
 
 /* Screen buffer is at the top of RAM */
 #define MAC_SCREEN_BASE     (MAC_RAM_SIZE - 0x5900)  /* 2MB: 0x1FA700 */
@@ -73,6 +130,10 @@ void mac_emu_set_mouse(int x, int y, bool button);
 /* Musashi callback declarations (must be extern "C") */
 int mac_int_ack_handler(int level);
 void mac_reset_handler(void);
+
+/* Idle fast-forward hooks (mac_emulator.c) */
+void mac_aline_hook(unsigned int trap_word, unsigned int trap_pc);
+void mac_idle_note_irq(void);
 
 #ifdef __cplusplus
 }

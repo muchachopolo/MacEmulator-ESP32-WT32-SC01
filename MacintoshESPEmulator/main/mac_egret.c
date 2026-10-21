@@ -15,6 +15,19 @@
  * attention byte (discarded). CPU asserts TIP -> reply byte 0; each further
  * handshake -> next byte; TREQ is negated with the last byte. CPU negates
  * TIP -> idle. Reply packet: [type][flag][cmd][data...], type 1 = pseudo.
+ *
+ * One-second tick: the MCU, not the VIA, keeps the clock. Each second it
+ * sends an unsolicited tick packet [03][00][00] (type 3 = TIMER_PACKET in
+ * Linux adb.h). The ROM's unsolicited-packet path (LC II $A14A88: type 3 ->
+ * Egret globals $28 = $A14BE2; Color Classic Cuda $AD026A) jumps through
+ * Lvl1DT[0], the one-second handler $A0B140 (ADDQ.L #1,Time). The VIA1
+ * CA2 flag that via_one_second() sets is never taken on V8 (that handler
+ * is not reached), so without these packets Time ($20C) never advances. Started once the ROM has sent SET_ONE_SECOND_MODE ($1B):
+ * Cuda (Color Classic sends mode 3) when the mode is != 0; Egret (LC II
+ * sends mode 0 early in boot) while autopoll is on, i.e. once the
+ * interrupt-driven manager runs (Linux sees Egret timer packets after
+ * enabling autopoll). Earlier, the ROM's polled PRAM code ($A15392) raises
+ * SysSes without looking at TREQ and would read a tick as its reply.
  */
 #include "mac_egret.h"
 #include "mac_via.h"
@@ -30,6 +43,9 @@ static const char *TAG = "egret";
 #define EG_BYTEACK  0x10
 #define EG_DELAY    64      /* CPU cycles before the MCU answers an edge */
 #define EG_CUDA     MAC_V8_CUDA     /* Cuda line polarities (Color Classic) */
+#ifndef EGRET_ONE_SEC_TICKS             /* 1 = send the 1 Hz tick packets */
+#define EGRET_ONE_SEC_TICKS 1
+#endif
 
 enum { EG_IDLE, EG_CMD, EG_ATTN, EG_REPLY, EG_SYNC };
 enum { ACT_NONE, ACT_OUT_DONE, ACT_ATTN, ACT_BYTE, ACT_SYNC_ON, ACT_SYNC_OFF, ACT_SR_IRQ };
@@ -49,7 +65,11 @@ static struct {
     bool stream;                /* Egret READ_PRAM: keep returning bytes */
     uint8_t stream_addr;
     int log_cnt;
-    bool unsolicited;           /* reply[] holds an autopoll packet */
+    bool unsolicited;           /* reply[] holds an unsolicited packet */
+    bool unsol_tick;            /* ... and it is a tick packet, not ADB */
+    bool sec_mode_set;          /* SET_ONE_SECOND_MODE seen */
+    uint8_t sec_mode;           /* its argument */
+    int ticks_pending;          /* one-second ticks not yet delivered */
     bool list_set;              /* SET_DEVICE_LIST seen */
     uint16_t dev_mask;          /* autopoll device list */
     int poll_wait;              /* cycles until the next autopoll packet */
@@ -160,7 +180,22 @@ void egret_init(void)
     eg.ack = EG_CUDA ? EG_BYTEACK : 0;
     eg.action = ACT_NONE;
     eg.unsolicited = false;
+    eg.unsol_tick = false;
+    eg.ticks_pending = 0;
+    eg.sec_mode_set = false;
     via_egret_set_treq(false);
+}
+
+/* An unsolicited packet was abandoned (command collision / TIP dropped
+ * before the last byte): give its content back for a retry. */
+static void unsolicited_untake(void)
+{
+    if (eg.unsol_tick) {
+        if (eg.ticks_pending < 4) eg.ticks_pending++;
+    } else {
+        mouse_untake();
+    }
+    eg.unsol_tick = false;
 }
 
 static void schedule(int action)
@@ -264,6 +299,11 @@ static void process_command(void)
         }
         case 0x22:                          /* GET/SET IIC: no devices */
             break;
+        case 0x1B:                          /* SET_ONE_SECOND_MODE mode */
+            eg.sec_mode_set = true;
+            eg.sec_mode = na > 0 ? a[0] : 0;
+            eg.ticks_pending = 0;
+            break;
         case 0x19:                          /* SET_DEVICE_LIST mask.w */
             eg.list_set = true;
             eg.dev_mask = na >= 2 ? (uint16_t)((a[0] << 8) | a[1]) : 0;
@@ -342,7 +382,7 @@ void egret_portb_changed(uint8_t orb, uint8_t ddrb)
             /* Collision: the CPU starts a command while our autopoll
              * packet waits. Drop the packet (data goes back) and take
              * the command. */
-            mouse_untake();
+            unsolicited_untake();
             eg.unsolicited = false;
             eg.action = ACT_NONE;
             eg.state = EG_IDLE;
@@ -366,6 +406,7 @@ void egret_portb_changed(uint8_t orb, uint8_t ddrb)
         if (eg.state == EG_CMD) {
             if (eg.cmd_len >= 2) {
                 eg.unsolicited = false;
+                eg.unsol_tick = false;
                 process_command();
                 eg.state = EG_ATTN;
                 schedule(ACT_ATTN);
@@ -374,7 +415,7 @@ void egret_portb_changed(uint8_t orb, uint8_t ddrb)
             }
         } else if (eg.state == EG_REPLY || eg.state == EG_ATTN) {
             if (eg.unsolicited && eg.reply_idx < eg.reply_len)
-                mouse_untake();             /* autopoll packet not fully read */
+                unsolicited_untake();       /* packet not fully read */
             eg.unsolicited = false;
             eg.state = EG_IDLE;             /* session over (or aborted) */
             eg.action = ACT_NONE;
@@ -407,13 +448,25 @@ void egret_portb_changed(uint8_t orb, uint8_t ddrb)
     }
 }
 
-/* Autopoll: with the mouse holding data, start an unsolicited
- * [00][40][addr<<4|$C][b0][b1] packet through the attention handshake. */
+/* Unsolicited packets, through the attention handshake:
+ *  - one-second tick [03][00][00] (see the header comment);
+ *  - autopoll: with the mouse holding data, [00][40][addr<<4|$C][b0][b1]. */
 static void autopoll(int cycles)
 {
     if (eg.poll_wait > 0) eg.poll_wait -= cycles;
-    if (eg.poll_wait > 0 || !eg.autopoll || eg.state != EG_IDLE || eg.tip ||
-        !mouse_pending())
+    if (eg.state != EG_IDLE || eg.tip)
+        return;
+    if (eg.ticks_pending > 0) {
+        eg.ticks_pending--;
+        eg.stream = false;
+        reply_hdr(0x03, 0x00, 0x00);
+        eg.unsolicited = true;
+        eg.unsol_tick = true;
+        eg.state = EG_ATTN;
+        schedule(ACT_ATTN);
+        return;
+    }
+    if (eg.poll_wait > 0 || !eg.autopoll || !mouse_pending())
         return;
     if (eg.list_set && !(eg.dev_mask & (1u << ms.addr)))
         return;
@@ -430,6 +483,7 @@ static void autopoll(int cycles)
                  d[0], d[1], ms.dx, ms.dy, ms.qn);
     }
     eg.unsolicited = true;
+    eg.unsol_tick = false;
     eg.state = EG_ATTN;
     eg.poll_wait = EG_POLL_CYCLES;
     schedule(ACT_ATTN);
@@ -480,6 +534,10 @@ void egret_tick(int cycles)
 void egret_one_second(void)
 {
     eg.rtc++;
+    /* Queue a tick packet (a few at most: a session may hold off delivery) */
+    if (EGRET_ONE_SEC_TICKS && eg.sec_mode_set &&
+        (EG_CUDA ? eg.sec_mode != 0 : eg.autopoll) && eg.ticks_pending < 4)
+        eg.ticks_pending++;
 }
 
 #endif /* MAC_ROM_LC_II */
