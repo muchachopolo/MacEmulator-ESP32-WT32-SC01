@@ -224,7 +224,8 @@ measurements behind each step:
 | [`docs/musashi-integration.md`](docs/musashi-integration.md) | CPU core, 68030/PMMU stub, native speed-ups |
 | [`docs/peripherals.md`](docs/peripherals.md) | VIA, Egret/Cuda, RTC, SWIM, disk path, SCSI, SCC |
 | [`docs/display-pipeline.md`](docs/display-pipeline.md) | Renderer, native 480×320 modes, touch |
-| [`MacintoshESPEmulator/host/README.md`](MacintoshESPEmulator/host/README.md) | PC host harness and profiler |
+| [`docs/learn/07-host-harness.md`](docs/learn/07-host-harness.md) | PC host harness tutorial (how to use it) |
+| [`MacintoshESPEmulator/host/README.md`](MacintoshESPEmulator/host/README.md) | PC host harness reference and profiler |
 | [`CLAUDE.md`](CLAUDE.md) | Contributor guide: build switches, budgets, ground rules |
 
 ## Credits

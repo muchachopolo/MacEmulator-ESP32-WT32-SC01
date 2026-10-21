@@ -1,5 +1,8 @@
 # Host harness (x86 Linux / WSL)
 
+> New to the harness? Start with the hands-on tutorial:
+> [docs/learn/07-host-harness.md](../../docs/learn/07-host-harness.md). This file is the reference.
+
 Compiles the ESP32 emulator core (`main/mac_*.c` + `components/musashi`)
 **unmodified** with gcc and runs it on the PC, so boot bugs can be iterated
 in about a second instead of a flash cycle. Nothing in `main/` or
