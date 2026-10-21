@@ -149,6 +149,13 @@ static void game_mode_track(const uint8_t *r)
 
 static bool game_mode_active(void)
 {
+    /* The frame-end sample above depends on which process happens to be
+     * current; on the board (idle fast-forward ends frames in the Process
+     * Manager's idle loop) it rarely sees the game. Full-screen games also
+     * hide the cursor, and CrsrState ($08D0, word, <0 = hidden) is global,
+     * not swapped per process, so it is reliable at the moment of the tap. */
+    const uint8_t *r = mac_mem_get_ram();
+    if (r && mac_post_boot && (int16_t)((r[0x08D0] << 8) | r[0x08D1]) < 0) return true;
     return gm_score >= 60;
 }
 #endif
