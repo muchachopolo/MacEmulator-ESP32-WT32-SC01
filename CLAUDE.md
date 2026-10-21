@@ -5,7 +5,13 @@
 A Macintosh Classic emulator running on the WT32-SC01-3.4 board (ESP32-WROVER-B).
 Emulates a 68000 CPU via Musashi, with 512x342 monochrome display scaled to 480x320 RGB565 on an ST7796 SPI LCD with FT5x06 capacitive touch.
 
-**Current status**: System 7.5.3 Finder launches and runs stably with trackpad-style touch input and working mouse clicks. Full boot sequence completes (ROM self-test → boot block → System file → INITs → _InitWindows → _Launch → Finder). Speed: 39-91% real-time (peak ~91% at idle, 57-67% during boot). Touch screen works as relative trackpad (swipe to move cursor without clicking, tap to click, tap-then-drag for click-and-drag).
+**Two targets** (selected by `ROM_NAME` in `main/CMakeLists.txt`):
+- **Classic.ROM** (68000, mono): the working build and fallback. Last fully working commit: c9abaef. Same 512KB ROM size as LC-II.ROM. If LC II at 1-bit measures as fast as Classic, LC II replaces it (one build: 1-bit for speed, colour on demand).
+- **V8 / 68030** (`MAC_ROM_LC_II=1`, colour-capable): in progress. **Build uses LC-II.ROM** (user decision 2026-10-20; `MAC_V8_CUDA=0`, Egret). Color-Classic.ROM remains selectable (`MAC_V8_CUDA=1`, Cuda) only as a reference. Done: Egret/Cuda HLE (`main/mac_egret.c`), 68030 MMU instruction stub (no translation), V8 video hardware (`main/mac_v8video.c`, VRAM $F40000). V8 floppy via a .Sony Prime hook (`main/mac_v8disk.c`), VRAM/CLUT renderer, and a native **480×320** mode patched into the ROM's video declaration blocks (1:1 on the LCD). On the host the LC II boots System 7.5.3 to the Finder. Still unverified on hardware: panel colour order, speed, and touch/mouse on V8. See `spec/performance-roadmap.md` → "Phase 2 attempt 4" and "ROM choice reassessment".
+
+**Next work:** follow `spec/next-steps-plan.md` (ordered plan: commit/cleanup → board A/B incl. an open idle-speed regression → keyboard → native trap acceleration). As of 2026-10-21 nothing from 2026-10-20/21 is committed.
+
+**Current status (Classic build)**: System 7.5.3 Finder launches and runs stably with trackpad-style touch input and working mouse clicks. Full boot sequence completes (ROM self-test → boot block → System file → INITs → _InitWindows → _Launch → Finder). Speed: 39-91% real-time (peak ~91% at idle, 57-67% during boot). Touch screen works as relative trackpad (swipe to move cursor without clicking, tap to click, tap-then-drag for click-and-drag).
 
 ## Repository Layout
 
@@ -24,14 +30,15 @@ D:\Personal\Macintosh\
 │   ├── components/
 │   │   ├── musashi/          # Musashi 68000 CPU emulator (copied source)
 │   │   └── display/          # Native esp_lcd display driver
-│   ├── build.bat             # ESP-IDF v6.0 build wrapper (must use cmd.exe)
+│   ├── host/                 # x86 host harness: same core + ESP-IDF shims (fast debugging)
+│   ├── build.bat             # ESP-IDF v6.1 build wrapper (must use cmd.exe)
 │   ├── partitions.csv        # Custom partition table (4MB flash)
 │   └── sdkconfig.defaults    # SDK configuration
 ├── ROM/                      # ROM and disk images (not in git, gitignored)
 │   ├── Classic.ROM           # 512KB Mac Classic ROM (required)
 │   ├── OS_750_boot.dsk       # 1.44MB System 7.5.3 boot floppy
-│   ├── Color-Classic.ROM     # For future 68030 upgrade
-│   └── LC-II.ROM             # For future 68030 upgrade
+│   ├── Color-Classic.ROM     # 1MB, 68030 V8-family (current V8 bring-up ROM)
+│   └── LC-II.ROM             # 512KB, 68030 V8-family, complete dump (planned V8 ROM)
 ├── board_test/               # Hardware diagnostic project
 ├── docs/                     # Architecture documentation
 ├── tools/                    # ROM analysis & disk parsing scripts
@@ -58,6 +65,15 @@ cmd.exe //C "D:\\Personal\\Macintosh\\MacintoshESPEmulator\\build.bat set-target
 
 After `fullclean`, you must run `set-target esp32` before building.
 
+### Host harness (debug on the PC first)
+
+`MacintoshESPEmulator/host/` compiles the unmodified `main/mac_*.c` + Musashi for x86 (WSL gcc) against small ESP-IDF shims. 3000 frames run in under 1 s, versus minutes on the board. It writes LCD screenshots as PNG, can dump RAM, and `make TRACE=1` gives a per-instruction trace. Debug emulation logic here; flash the board only to confirm fixes and to measure speed. See `host/README.md`.
+
+```bash
+cd MacintoshESPEmulator/host && make -j16 && make run
+make TRACE=1 -j16 && ./build_trace/macemu --frames 600 --trace 100000 --log emu.log
+```
+
 ### Musashi Code Generation
 
 Musashi requires a two-stage build. The generated files (`m68kops.c`, `m68kops.h`) are **gitignored** — they exist only in the working tree, and regeneration replaces them. `m68k_in.c` (tracked) carries `EXT_RAM_BSS_ATTR` on the two big tables so every regeneration places them in PSRAM; without it the link overflows `.dram0.bss` by ~434KB. `m68kmake` does not read `m68kconf.h` — generated ops are config-independent, so a conf flip alone needs no regeneration.
@@ -82,7 +98,7 @@ gcc -o m68kmake m68kmake.c
 
 - **Board**: WT32-SC01-3.4 (Wireless Tag)
 - **SoC**: ESP32-D0WD rev v1.0 (dual-core Xtensa LX6 @ 240MHz)
-- **Flash**: **4MB** (detected, despite "16MB" label on board), 80MHz DIO
+- **Flash**: **4MB** (detected, despite "16MB" label on board), 80MHz **QIO** (verified 2026-10-20, +1.1% speed vs DIO)
 - **PSRAM**: 8MB physical, **~4MB usable** (ESP32 virtual address space limit), 80MHz quad SPI
 - **Display**: ST7796 480x320 SPI (MOSI=13, CLK=14, CS=15, DC=21, RST=22, BL=23) — verified working
 - **Touch**: FT5x06 capacitive I2C (SDA=18, SCL=19, addr=0x38) — verified detected on I2C scan
@@ -144,8 +160,11 @@ The FT5x06 capacitive touch panel acts as a relative trackpad with tap-to-click:
 - **Tap-then-drag** (second touch within 400ms of tap): click-and-drag for menus/windows
 - **Lift finger**: stops cursor movement / ends drag
 
-Implementation (`mac_emulator.c`):
-1. Polls FT5x06 at ~60Hz via `display_get_touch()` (I2C, core 1)
+Implementation (`mac_touch.c` gestures/sampler, `mac_emulator.c` apply):
+0. `TOUCH_SAMPLER_TASK` (default 1 on ESP32, 0 on host): a FreeRTOS task on core 0 (`touch_sampler_start()` from main.cpp) samples at ~60 Hz independent of emulation speed; the emulation loop calls `touch_consume()` once per frame (spinlock-guarded queue: movement + ordered button transitions, each button state held >= 2 frames). With 0, `touch_poll_inline()` samples from the loop every 16 ms.
+   Once a touch crosses 8 px the movement since touch-down is applied (no dead zone); after 300 ms a 3 px nudge also counts as a drag.
+   **LC II / V8**: cursor positioned absolutely like the Classic (`v8_apply_touch()`: MTemp/RawMouse/Mouse = Mouse + delta, CrsrNew if CrsrCouple) — 1:1, no acceleration. The emulated ADB mouse carries the button only (zero deltas); movement after a button transition waits until that transition is in an ADB packet.
+1. Polls FT5x06 at ~60Hz via `display_get_touch()` (I2C)
 2. Touch axes are swapped and horizontal inverted vs display orientation
 3. Gesture detection: tracks touch start time/position, classifies as tap or drag
 4. Cursor delta applied only during drags (not on first touch frame)
@@ -184,8 +203,8 @@ Implementation (`mac_emulator.c`):
 
 ## Future Work
 
-- **Further performance**: 97% of time is in m68k_execute(). Gains require optimizing Musashi core (e.g., computed goto dispatch, cycle table in IRAM), reducing PSRAM pressure, or upgrading to 68030 (fewer cycles per instruction). fast_slice increase is confirmed impossible.
-- **68030 upgrade**: Musashi supports 68030 emulation. Change `M68K_EMULATE_030` to `OPT_ON` in `m68kconf.h`, set CPU type to `M68K_CPU_TYPE_68030`, use a 68030-era ROM (Color Classic or LC II).
+- **Further performance**: 97% of time is in m68k_execute(). Gains require optimizing the Musashi core (computed-goto dispatch, hot handlers in IRAM, a smaller jump table) and reducing PSRAM/flash cache pressure. A 68030 ROM is **not** a speed lever: speed is host instructions per second, and no ROM beats Classic.ROM (68000, 1-bit). fast_slice increase is confirmed impossible. PSRAM workaround `DUPLDST` was measured 1.3% slower than `MEMW` (keep MEMW; the chip is rev v1.0, so the workaround cannot be disabled).
+- **68030 / colour (V8) track**: CPU `M68K_CPU_TYPE_68030` (Color Classic and LC II are both 68030). V8 device map from the ROM's decoder table: VIA1 $F00000, SWIM $F16000, SCC $F04000, SCSI $F10000, ASC $F14000, VDAC $F24000, pseudo-VIA2 $F26000, VRAM $F40000. The overlay clears on the first access to ROM at $A00000, not on a VIA ORA write. Remaining: Egret HLE, then video (VRAM, monitor sense, CLUT, depth-aware renderer). **Final ROM: LC-II.ROM** (saves 512KB of flash vs Color Classic).
 - SCC serial emulation (currently stub)
 - ~~Touch-screen mouse~~ — **DONE**: trackpad-style relative input with tap-to-click and tap-then-drag
 - ~~Mouse clicks~~ — **DONE**: event queue posting to EvQHdr $014A

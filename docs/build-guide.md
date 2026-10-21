@@ -98,6 +98,26 @@ This generates `m68kops.c` (~836KB, ~37,000 lines) and `m68kops.h` from the opco
 
 **After regeneration**: You must re-add the `EXT_RAM_BSS_ATTR` patch to `m68kops.c` (search for `m68ki_instruction_jump_table` and `m68ki_cycles` near line 34715).
 
+## Host Harness (PC build for debugging)
+
+`MacintoshESPEmulator/host/` builds the same emulator core for x86 Linux/WSL with ESP-IDF
+shims, so boot problems can be debugged in seconds:
+
+```bash
+cd MacintoshESPEmulator/host
+make -j16                 # build/macemu
+make run                  # 3000 frames, PNG screenshots in out/, RAM dump
+make TRACE=1 -j16         # build_trace/macemu with --trace N (per-instruction log)
+```
+
+See `host/README.md` for all options. The host has no touch, runs on a single thread, and
+uses plain RAM instead of PSRAM, so speed and timing must still be checked on the board.
+
+## Flash Mode
+
+`sdkconfig.defaults` selects QIO flash (measured +1.1% emulation speed vs DIO on this
+board). ESP-IDF still writes "dio" in the image header; the bootloader switches to QIO.
+
 ## Troubleshooting
 
 ### "MSYS/MinGW shell is not supported"

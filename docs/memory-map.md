@@ -73,3 +73,27 @@ The screen buffer is 512 * 342 / 8 = 21,888 bytes of 1-bit pixel data. Each scan
 - Word and long reads are constructed from consecutive byte reads (big-endian)
 - Writes to ROM space are silently ignored
 - Unmapped addresses return 0xFF (open bus)
+
+## V8 Family Map (Color Classic / LC II, `MAC_ROM_LC_II=1`)
+
+From the ROM's own decoder table (Color-Classic.ROM file $3490; LC-II.ROM holds the same
+constants). The 32-bit bases are $50Fxxxxx; the 24-bit bus drops the top byte.
+
+| Address | Device | Emulated |
+|---------|--------|----------|
+| $000000-$9FFFFF | RAM (2MB physical, aliased via mask) | yes |
+| $A00000-$AFFFFF | ROM ($40A00000) | yes |
+| $F00000-$F01FFF | VIA1 (registers every $200) | yes |
+| $F04000 | SCC | no |
+| $F06000 / $F10000 / $F12000 | SCSI DRQ / SCSI / SCSI handshake | no |
+| $F14000 | ASC (sound) | no |
+| $F16000-$F17FFF | SWIM | yes |
+| $F24000 | VDAC (CLUT) | TODO |
+| $F26000 | pseudo-VIA2 / RBV (video enable, monitor sense) | TODO |
+| $F40000-$FBFFFF | VRAM | TODO |
+| $FC0000 | diagnostic-ROM probe (nothing there) | reads $FF |
+
+Overlay: after reset the ROM is mirrored at $0-$7FFFF. It switches off on the first access
+to $A00000-$AFFFFF (the ROM jumps there at $A02E3E). VIA ORA writes do NOT clear it on V8.
+The Egret microcontroller (ADB, RTC, PRAM) talks through the VIA1 shift register with
+PB3/PB4/PB5 handshake lines.

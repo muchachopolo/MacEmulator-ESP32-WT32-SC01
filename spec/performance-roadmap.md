@@ -3,12 +3,17 @@
 Spec written 2026-10-16. Purpose: durable plan so a future session can resume without
 re-deriving context. Update the Status line and tick boxes as work lands.
 
-Status: Phase 0 done (2026-10-16). Phase 1 attempted and rolled back (2026-10-16) — 68020
-mode crashes the Classic-ROM boot; root cause recorded in Phase 1 below. Phase 2 IN PROGRESS
-(2026-10-16): build switched to 68030 + LC II ROM, boots to the boot block but the System-file
-load fails and it crashes at F2007 in SWIM space — LC II ROM needs its own bypass set; state
-recorded in Phase 2 below. NOTE: working tree + flashed binary are the Phase-2 (broken) config;
-the last fully working build is at commit c9abaef (68000 + Classic).
+**Next steps: see `spec/next-steps-plan.md` (2026-10-21).**
+
+Status (2026-10-20): Phase 0 done. Phase 1 rolled back. Phase 2 IN PROGRESS on
+Color-Classic.ROM. Attempt 4 (2026-10-20) found three emulator bugs that sank every
+earlier V8 attempt (wrong CPU, wrong overlay rule, Classic RECOVERY hack). Attempts 2/3
+were built on a misdecode and are superseded. The boot now runs on the real 68030 path
+and is blocked on **Egret** (ADB/RTC/PRAM microcontroller), which is being implemented
+on the host harness. **Plan of record: once V8 boots, switch the build to LC-II.ROM.**
+It is complete (512KB) and saves 512KB of flash vs the 1MB Color Classic ROM. Speed is
+identical (see "ROM choice reassessment"). The last fully working build is still
+commit c9abaef (68000 + Classic.ROM).
 
 ## Baseline (as of 2026-10-16)
 
@@ -36,7 +41,9 @@ machine code) dominates execution and must run on an emulated CPU regardless of 
 A custom ROM buys boot-time only. The speed levers, in order of value/risk:
 
 1. 68020 mode (correctness + cycles/instruction) — keep Classic ROM.
-2. 68030 mode + LC II ROM (bigger win, high risk — see Phase 2 risks).
+2. ~~68030 mode + LC II ROM (bigger win)~~. **Corrected 2026-10-20:** a 68030 machine is
+   not a speed lever. It is a capability lever (colour, >4MB RAM, newer System
+   versions). See "ROM choice reassessment".
 3. Native ESP32 intercepts for hot ROM routines (the "use ESP32 hardware" idea, done at
    the right layer).
 4. JIT 68000→Xtensa into IRAM (parked; only if 1–3 leave it too slow).
@@ -146,9 +153,11 @@ Build gotchas found along the way (keep for future regenerations):
 
 ## Phase 2 — 68030 mode + LC II ROM (the big lever)
 
-Goal: OS compiled for 68030 uses 030 addressing modes → fewer cycles per instruction.
-Target: >100% real-time. Assets already present: `ROM/LC-II.ROM` (68030),
-`ROM/Color-Classic.ROM` (68EC000 — 020-class, no FP; keep as fallback).
+Goal (revised 2026-10-20): a colour-capable 68030 Mac (V8 family) that boots System
+7.5.3. The original "fewer cycles per instruction → >100%" premise was wrong (see "ROM
+choice reassessment"). Assets: `ROM/LC-II.ROM` (512KB, complete, checksum $35C28F5F)
+and `ROM/Color-Classic.ROM` (1MB, $ECD99DC0). **Both are 68030 machines.** The earlier
+"Color Classic = 68EC000" note was wrong.
 
 Steps:
 1. `main/CMakeLists.txt:5`: `set(EMBED_FILES "${ROM_DIR}/LC-II.ROM")`.
@@ -204,6 +213,283 @@ disassembly against LC-II.ROM, same as Phase 2 step 4):
 4. The emulator's OS-trap-table / Toolbox checks read Classic low-mem locations — verify they
    read OS-version-dependent (7.5.3) addresses, not ROM-dependent ones.
 
+### Phase 2 attempt 2 (2026-10-19) — ROM identity: LC-II.ROM is a bad dump
+
+> **SUPERSEDED 2026-10-20 — conclusions below are WRONG.** `4E FA xxxx` is
+> `JMP d16(PC)`, and `4D FA 00 06 4E FA xxxx` is Apple's BSR6 idiom. The "far calls to
+> $A80000-$AFFFFF" are short PC-relative jumps inside the ROM (@1C52→$1D00,
+> @3076→$3124), so LC-II.ROM is complete. `$2A: 4E FA 00 60` is `JMP $8C(PC)`, not
+> `JSR $600000`, so the $600000/$5FFFD2 Start-Manager-alias model is unfounded.
+> See attempt 4.
+
+Analysis only (no build). Findings, all verified against the ROM files with
+`tools/romcheck.py`, `tools/scan_calls.py`, `tools/rom_dump.py`, `tools/dis_lc2_boot.py`:
+
+- **LC-II.ROM (512KB) is a truncated dump of a 1MB ROM.** Its code contains genuine
+  68020 far-call idioms (`LEA $+6,A6` then `JSR.L`) into $A80000-$AFFFFF — @1C52
+  JSR $AC0000, @3076 JSR $AC6600, @4A358 JSR $A808AA, @47B26 JSR $AC117C. Those are
+  offsets $808AA-$C6600, beyond the 512KB file. The file's checksum ($35C28F5F) is
+  self-consistent, but that only proves the dump tool recomputed it over the truncated
+  image; it is not the known Mac LC ROM ($350EACF0) either. The real LC II ROM is 1MB.
+- **V8 ROM aliasing proven cross-ROM:** LC-II calls $A44CDF, Color-Classic calls
+  $644CDF, and LC-II[$44CDF] == CC[$44CDF] byte-identical → the V8 ROM is aliased at
+  BOTH $600000-$6FFFFF and $A00000-$AFFFFF. Expert V8 map: ROM $40A00000-$40A7FFFF →
+  $A00000-$A7FFFF 24-bit view (A24-A30 undecoded), overlay mirrors ROM at $0-$7FFFF,
+  RAM $0-$9FFFFF. The compact-Mac "RAM moved to $600000" window is pre-V8 only.
+- Boot entry (all three ROMs): reset PC=$2A overlay-relative (lands in the vector-$A
+  slot). LC-II/CC bytes $2A: `4E FA 00 60 00 00` = JSR.L $600000 (6 bytes; dis68k.py
+  misdecodes 4E FA as a 4-byte PC-rel JMP). $600000-$67FFFF is RAM on V8 — the Start
+  Manager must be resident there at reset. ROM[$60000-$6FEFF] is FF00 ILLEGAL-guard
+  padding; real code resumes at $6FF00 (Start Manager disk I/O touching boot globals
+  $0134/$02FC/$0300/$0304/$038A/$038E). Only reference to $600000-$67FFFF in LC-II.ROM
+  is the boot JSR itself.
+- Color-Classic.ROM (1MB) is complete and self-consistent ($ECD99DC0), same boot
+  structure. Caveats: 68EC000 (020-class, no FPU) and expects a color display.
+
+Decision point: Phase 2 needs a genuine 1MB LC II ROM (re-dump) or switch ROM_NAME to
+Color-Classic.ROM. Either way the memory map under MAC_ROM_LC_II must become the V8 map:
+ROM aliased at $600000-$6FFFFF and $A00000-$AFFFFF (mask to ROM size), RAM $0-$9FFFFF,
+overlay mirror $0-$7FFFF→ROM, drop the $600000→RAM[$0] compact window.
+
+### Phase 2 attempt 3 (2026-10-19) — Color-Classic.ROM boots to F360+, MemTop never set
+
+Build state (uncommitted, working tree): ROM_NAME=Color-Classic.ROM, MAC_ROM_LC_II=1,
+V8 map in mac_memory.c (ROM $A00000-$AFFFFF + alias $600000-$60FFFF→rom[$6FF00+],
+RAM $0-$9FFFFF, fast-RAM test `addr<0x580000 || (addr>=0x610000 && addr<0x800000)`).
+Crash detector in mac_emulator.c re-derived for V8 (invalid PC = device windows only).
+
+Observed (serial_watch.log):
+- Reset PC=$2A SP=$ECD99DC0; JSR.L $600000 → alias → Start Manager runs (V8BOOT ov=1).
+- PC walk $1002F8→$1FFAD0 stride +0x7D0 (BB trace) — ROM's continuation executing in
+  RAM $100000-$1FFFFF.
+- Crash F7: PC=$580252, SP=$0FF9F8; PCBYTES@180252 = all zeros — the RAM code at
+  $1FFAD0 calls $580252 but nothing was ever written there.
+- MemTop ($031C) NEVER written (V8MT trace silent) → F100/F400 report MemTop=0.
+- V8WTEST/V8CPY write traces silent: nothing writes $1002F8/$1FFAD0/$360000 through
+  m68k_write_memory_* or mem_write_byte — yet PC executes $1002F8. Either the walk
+  region is written through a path not instrumented, or the +0x7D0 "walk" is not
+  sequential execution.
+- ROM poll sites `TST.B (A3); BPL self` all in file $70252-$70392 (alias $600340-$6003B8)
+  — the ROM's I/O-wait loop; V8DEC trace at $600EBE/$600352 never fired → that loop
+  never ran → the continuation is NOT decompressed, it is copied (or expected resident).
+
+Open questions to resolve next:
+1. Who writes $100000-$1FFFFF (the continuation copy)? Instrument the copy directly
+   (trace writes to $1FFAC0-$1FFAF0 in mem_write_byte — added, awaiting run).
+2. Is $580000-$5FFFFF RAM on V8 (SCSI driver code resident there) with the SCSI
+   device window elsewhere? The ROM calling $580252 as code suggests yes — re-derive
+   the V8 device map from the ROM's own abs.L references.
+3. The boot-block read from the floppy (OS_750_boot.dsk) must complete for the Finder;
+   DM intercepts are Classic-addressed ($40xxxx) and cannot match V8 ROM reads.
+
+**Attempt 3 resolution (2026-10-19): the alias lower bound was the bug.** The ROM's
+Start Manager stub begins at file $0FFD2 = bus $5FFFD2 (preceded by zeros at $0FFD1);
+the alias is $5FFFD2-$610000 (file $0FFD2 + (addr-$5FFFD2)), NOT $600000-$610000.
+With the stub served as RAM zeros it was a zero-walk; with the widened alias it
+executes real ROM code, copies the continuation into RAM ~$394829, and the OS runs
+from there: BOOT3-F6xx PCs $7Axxxx-$7Fxxxx, F4000 reached at 17% real-time, no crash.
+The stub's pushed $27100000 (masked $100000) return is superseded by the copy's
+real destination. MemTop($031C) still reads 0 in Classic-keyed diagnostics — V8
+globals are A5=$002600-relative, so those reads hit the wrong page (noise). BADPC
+filter still Classic-keyed (noise). Remaining: re-derive the disk-I/O completion
+intercepts (BOOT_READ_HELPER/DM_READ/SPIN/CTL/STAT) against V8 ROM addresses when
+the System-file load stalls; watch the run for the load phase.
+
+**Attempt 3 cont'd (2026-10-20): V8 boot reaches Finder.** "FinderName=... CurApName=..."
+at t=641s (10.7 min), no crash, V8SPIN never fired (the generic same-(addr,PC) byte-read
+detector replaced the fixed-window V8DEC trace — the ROM's wait loop `4A 13 6A FC` lives
+at file $70252+ = bus $CF2652+, i.e. it runs in copied RAM, so fixed bus windows cannot
+catch it). Boot-phase speed 5% real-time = the V8 RAM-size test running legitimately.
+Post-boot PC-HIST (V8 mapping fixed: `pc_hist[(pc>>12)&511]` — the first mapping
+overflowed pc_hist[640] via V8 PCs $5FFFD2/$7Dxxxx): 85 samples, max share 4% → Finder
+is NOT a compute spin; it plateaus at 15-19% real-time. Working theory: Finder is
+disk-decode-bound through IWM/SWIM because the DM disk intercepts are keyed to
+Classic/LC-II addresses, not Color-Classic ROM (and V8 OS code executes in copied RAM
+at run-varying addresses, so address-keyed intercepts may need pattern-scan instead).
+Instrument: `v8_iwm_reads` counter in mac_iwm.c's iwm_read, logged as IWMR per 300-frame
+SPEED report — flashed, awaiting read. Millions of reads/300 frames confirms the theory;
+near-zero means the 18% plateau has another cause.
+
+**Attempt 3 cont'd (2026-10-20, evening batch): CPU mode was the plateau.** Setting
+`m68k_set_cpu_type(M68K_CPU_TYPE_68000)` (Color Classic is a 68EC000 machine; Musashi's
+030 core carries per-instruction overhead) took idle from 17% to 73% and boot from 636s
+to 157s. Finder launches; the LCD stays blank (green = stale panel, our LUT only emits
+black/white, draw_bitmap never errors). ScrnBase=$040060 is valid but its framebuffer is
+never painted (xor constant, bar all zeros); 99% of post-Finder samples sit in 16KB page
+$010000-$01FFFF (OS code from the boot floppy) with occasional PC=$000036 visits — the OS
+runs but does not draw. DM intercepts re-verified: V8 ROM file $0BB24 == Classic file
+$0315C byte-for-byte (except JMP disp) → the LC-II constants are correct for Color-Classic;
+the `#if !MAC_ROM_LC_II` gating on the DM/BOOT_READ call sites was reverted (runs 7/8 were
+identical with and without it). New probe at F3000: TheDisplay GDevice ($0CA6) → Port
+baseAddress + colorMode — hypothesis is the V8 OS boots in COLOR mode and draws to an
+8-bit buffer that is not ScrnBase. If so, the renderer must read that buffer (rowBytes)
+or the OS must be forced to mono. PAGE dump base fixed to `<<14` to match the sampler.
+
+### Phase 2 attempt 4 (2026-10-20) — host harness; three root causes; Egret
+
+New tool: **host harness** `MacintoshESPEmulator/host/`. It compiles the unmodified
+emulator core for x86 with ESP-IDF shims. 3000 frames run in 0.5–0.8 s, versus about
+7 min on the board. `make TRACE=1` adds a per-instruction trace (`--trace N`, plus
+`trace_ring.txt` at exit). Its logs reproduce the board's line for line. Debug V8 here
+first; use the board only to confirm and to measure speed.
+
+Root causes found by instruction trace (all fixed in the working tree):
+1. **CPU type.** The V8 build ran Musashi as a 68000. The Color Classic/LC II reset code
+   opens with `$F4AC` (cache op), which faults on a 68000; the Classic RECOVERY hack then
+   jumped to $0036. Every 68000-mode "boot to Finder" (incl. "72% idle") ran on a
+   corrupted path, which is where the `$2704` (saved SR) smeared over MemTop/ScrnBase
+   came from. Fix: `M68K_CPU_TYPE_68030` under `MAC_ROM_LC_II`.
+2. **Overlay rule.** The Classic "first VIA ORA write clears the overlay" latch fired at
+   ROM $47EA and removed the ROM under the CPU (zero walk → $2000CC). V8 rule: the
+   overlay clears on the first access to the real ROM window $A00000 (MAME-style).
+   Fix: `via_clear_overlay()` called from `mem_read_byte`; ORA latch is Classic-only.
+3. **Device map.** Taken from the ROM's own decoder table (CC file $3490; LC II has the
+   same constants): VIA1 $F00000, SCC $F04000, SCSI $F10000, ASC $F14000, SWIM
+   $F16000, VDAC $F24000, pseudo-VIA2/RBV $F26000, VRAM $F40000; $FC0000 is the diag-ROM
+   probe. VIA1 and SWIM moved; VRAM/VDAC/pseudo-VIA2 still TODO (needed for video).
+Also: both RECOVERY redirects are disabled for V8, so real faults surface.
+
+Current blocker: **Egret handshake** spin at $AB39BA (CC) / $A14E20 (LC II). It is
+`BTST #2,$1A00(A2)`, waiting for VIA1 IFR.SR, using PB3/PB4/PB5 handshake lines.
+LC-II.ROM follows the identical path on the host (overlay clears at $A02E3E, then the
+Egret spin). Egret HLE is in progress (host-first). After Egret: video (VRAM,
+pseudo-VIA2 monitor sense, VDAC CLUT, depth-aware renderer, 512×384 → 480×320).
+
+ESP32 config A/B (same firmware, steady idle, ms per 300 frames):
+| Config | Idle | Verdict |
+|---|---|---|
+| MEMW + DIO (baseline) | 6936 | — |
+| DUPLDST + DIO | 7023 (−1.3%) | rejected (also needed `-Wno-error=volatile` for IDF v6.1) |
+| MEMW + **QIO** | **6860 (+1.1%)** | kept, in `sdkconfig.defaults` |
+
+### Phase 2 attempt 5 (2026-10-20) — MMU stub, video found, SWITCHED TO LC II
+
+- **PMMU stub** (`components/musashi/m68kmmu.h`): handles PMOVE TC/SRP/CRP/TT0/TT1/MMUSR,
+  PLOAD/PFLUSH(A) as no-ops, and PTEST via a software table walk, with correct EA lengths.
+  There is no per-access translation (`M68K_EMULATE_PMMU` stays OFF). The ROM's own MMU
+  tables were verified to map the same addresses as our 24-bit masking.
+- **Musashi bug fixed earlier in this session:** `CPU_TYPE_IS_010_LESS` was a constant 1
+  with 020 emulation on. That made 020/030 decode indexed EAs and exception frames the
+  68000 way, which is probably the real cause of the Phase 1 failure.
+- **Egret/Cuda HLE** (`main/mac_egret.c`): the Color Classic is Cuda, LC/LC II are
+  Egret. It handles PRAM, the RTC, IIC, autopoll and 6805 memory reads/writes, and the
+  LC II's 32-byte streaming PRAM reads.
+- **V8 RAM:** no aliasing above `ram_size` (reads $FF), so the ROM sizes 2MB correctly.
+- **Machine ID** (VIA1 PA): CC = $0B, LC II = $5D (ProductInfo $A03BA6, BoxFlag $0D).
+- **VIA IRQ** is now pushed to the CPU immediately on V8. A stale IRQ had zeroed
+  TimeDBRA, causing a divide-by-zero Sad Mac.
+- **SWIM** write-FIFO model for clock calibration. SCSI regs ($F10000-$F13FFF) and SCC
+  ($F04000) are mapped for V8.
+- **Video** (`main/mac_v8video.c`): 512KB VRAM at $F40000 (PSRAM), VDAC CLUT at $F24000,
+  and pseudo-VIA2 at $F26000. Sense = 2 (12" RGB 512×384). The VBL is pulsed on
+  SlotIFR bit 6. The ROM draws the grey desktop and the cursor into VRAM.
+  ScrnBase=$50F40000, rowBytes=1024 (fixed). CC boots at 8bpp; LC II starts at 1bpp.
+- **Build switched to LC-II.ROM** (`main/CMakeLists.txt` ROM_NAME; new `MAC_V8_CUDA`
+  define: 1 = CC, 0 = LC II; host `make MAC_V8_CUDA=1` builds CC). The ESP32 binary went
+  from 0x2F5350 to 0x273350 (**−520KB flash**, 38% free).
+- **Next blocker (both ROMs):** floppy boot loop at $A01484-$A014CE. The V8 SWIM read
+  path never returns a sector, because `mac_iwm.c` is tuned to Classic-ROM PCs and
+  register 6 lacks set/clear semantics. Fix with correct SWIM ISM reads or a V8 .Sony
+  read intercept. Also: `mac_video.c` still renders 1-bit main-RAM ScrnBase, so it needs
+  a V8 path that reads VRAM through the CLUT. VRAM goes through the byte slow path and
+  will need a 16/32-bit fast path.
+
+### Phase 2 attempt 6 (2026-10-20) — LC II boots to Finder at native 480×320 (host)
+
+- **Floppy:** `main/mac_v8disk.c` replaces only .Sony Prime. After the driver's Open,
+  JPrime ($0226) is repointed per frame to a 12-byte stub served from unmapped bus
+  $FE0000 (`TST.B $FE0100` runs `v8disk_prime()`, then JIODone). Reads come from the
+  embedded image. Writes return wPrErr, and the volume mounts locked. Nothing runs per
+  instruction.
+- **SWIM on V8:** real IWM↔ISM mode switching, a 16-entry drive sense table, and drive 2
+  reported not installed (this fixed "Disk initialization failed!").
+- **VIA timers on V8** count at CPU/10 (E clock) with mid-slice interpolation. This fixed
+  the System timing calibration's divide-by-zero and the Time Manager T2 spin.
+- The Classic F600 boot-patch block is gated off for V8.
+- **Renderer:** `v8_render()` in `mac_video.c` reads VRAM at 1/2/4/8/16 bpp through the
+  CLUT (MAME index rule). It draws 1:1 at 480×320 and scales otherwise. The palette is
+  byte-swapped for esp_lcd; panel colour order is UNVERIFIED on hardware.
+- **VRAM fast path** for 8/16/32-bit accesses: about 13% less host CPU while drawing.
+- **Native 480×320:** `v8video_patch_rom()` patches the 512×384 VPBlocks in the
+  declaration ROM ($7EC18-$80000 on LC II; 13 blocks, 5KB PSRAM copy) and recomputes the
+  Slot Manager CRC. The copy is served on byte reads; the flash image stays intact for
+  the startup word-sum. Main device rect, pixel map bounds and CrsrPin all = 480×320.
+- **PRAM $01 = 1** (Egret init): the SCSI startup-disk wait drops from 20 s to 1 s. The
+  boot-block read moved from about F1550 to about F642.
+- Host: LC II, Classic and Color Classic all reach Finder in 20000 frames with no
+  CRASH. ESP32 binary 0x2718E0 (38% free). **First LC II board flash 2026-10-20.**
+
+### Decision (user, 2026-10-20): LC II is the target ROM
+
+Ship on **LC-II.ROM**. Color-Classic.ROM is a bring-up aid only. Switch `ROM_NAME` as soon
+as LC II reaches the same boot stage, then drop Color Classic unless it proves to offer
+something LC II can't. Known LC II gaps (host, `-DEG_CUDA=0`): it passes the Egret
+exchanges but stalls in the RAM test (memory filled with $B6DB6DB6). Its machine ID
+(VIA1 port A ID bits) and RAM layout (4MB on-board on a real LC II; we have 2MB) are not
+modelled yet. The MMU stub, V8 map, overlay rule and video work are shared code.
+
+### Video plan: native 480×320 mode (both ROMs)
+
+LCD = ST7796 480×320 RGB565 over SPI at 40 MHz. Scaling a Mac mode is lossy: 512×384 →
+0.94×0.83, which squashes the picture or drops 1 line in 6. 640×480 is unreadable. Both
+ROMs carry monitor tables (searched for `0000 0000 hhhh wwww` rects). LC II has
+512×384, 640×480, 640×870 and 560×384 at file $7F7CC-$7FEDE. CC has the same set plus
+640×400, 512×342 and 1152×870 (around $9AC38 and $F6F66). The monitor is chosen by the
+sense lines we emulate (pseudo-VIA2 $F26000), on either machine.
+Plan:
+1. Implement VRAM ($F40000), VDAC CLUT ($F24000) and the pseudo-VIA2 sense lines. Boot as
+   a 512×384 colour monitor first, using the existing scaler with a depth-aware path.
+2. Confirm which table entry the V8 video driver actually uses (bounds, rowBytes, depth
+   modes). Then patch that entry at ROM load to **480×320** (the same mechanism as the
+   Classic ROM patches; the ROM checksum check is already skipped).
+3. The renderer becomes 1:1: a CLUT lookup per pixel, no scaling tables. That is
+   crisper and cheaper; an 8-bit frame is 150KB vs 192KB at 512×384.
+Risks: code that assumes 512-pixel rows, and the driver's own timing/rowBytes
+arithmetic. Validate on the host with PNG screenshots before flashing.
+
+### ROM choice reassessment (2026-10-20)
+
+**Emulation speed is set by how many 68k instructions the host executes per second, not
+by the ROM.** Real-time % only compares against the emulated clock we choose
+(`MAC_CPU_HZ` = 7.8336 MHz for every build today). Musashi's 68030 cycle table charges
+fewer cycles per instruction, so a fixed cycle budget runs *more* instructions per frame.
+The real-time % therefore drops, while useful work per real second stays the same. What
+actually changes the user-visible speed:
+
+| Factor | Effect | Notes |
+|---|---|---|
+| CPU core mode (68000 vs 68020/030) | small–moderate | the 030 path has extra decode/EA work; measure on a correct V8 boot (the old "17% vs 91%" came from a broken boot) |
+| Screen depth | **large** | QuickDraw moves 1/2/4/8× the bytes at 1/2/4/8-bit; the renderer reads the same multiple; 1-bit is cheapest |
+| RAM size touched | small | PSRAM cache pressure |
+| ROM routines vs disk patches | negligible | System 7.5.3 code dominates either way |
+
+Candidate ROMs ranked for raw speed:
+1. **Mac Classic (current, Classic.ROM)**: 68000, 1-bit 512×342 (21KB framebuffer,
+   native to our renderer). The fastest possible target, and proven at 91% idle. Limits:
+   4MB RAM max, mono only.
+2. **Classic II**: 68030 but 1-bit 512×342 built-in, Egret, V8-family. Same speed as LC
+   II at 1-bit. Its ROM is not on hand (it would need a dump), and it gains nothing over
+   LC II set to 1-bit.
+3. **LC II (LC-II.ROM)**: 68030, colour 512×384 at 1/2/4/8-bit (selectable in
+   Monitors), 512KB ROM. Speed ≈ Classic II when the Mac is set to 1-bit; slower in
+   colour by the depth factor.
+4. **Color Classic**: same machine class as LC II, but the ROM is 1MB (~908KB used; the
+   rest is a larger multi-machine driver set). No speed gain, and it costs 512KB of flash.
+5. Mac LC (68020): no gain over 030 in Musashi with PMMU off. Mac II/Quadra (FPU/68040,
+   bigger ROMs): slower.
+
+**Decision:** no ROM is faster than Classic.ROM. Classic.ROM and LC-II.ROM are the
+same size (512KB). At 1-bit the LC II does the same drawing work, and its only extra
+cost is the 68030 core (unmeasured; the old "17% vs 91%" came from a broken boot). Once
+V8 reaches Finder, compare both on wall-clock workloads. If LC II at 1-bit is within a
+few % of Classic, **LC II becomes the single build** (1-bit for speed, colour on demand)
+and Classic is retired to a fallback. For the colour/68030 track, use
+**LC-II.ROM** (same speed as Color Classic, 512KB less flash, and the same V8 code path
+under `MAC_ROM_LC_II`). Keep Color-Classic.ROM only until the V8 boot works, then flip
+`ROM_NAME` in `main/CMakeLists.txt`. Run the colour build at 1-bit when speed matters.
+Measure speed by wall-clock for fixed workloads (boot-to-Finder seconds, open-folder
+time), not real-time %, when comparing machines.
+
 ## Phase 3 — Native intercepts for hot routines
 
 Goal: replace the top ROM routines (from Phase 0 histogram — expect Line-A primitives,
@@ -235,13 +521,17 @@ anomaly is zero and BADPC is zero.
 
 ## Definition of done (whole roadmap)
 
-Finder runs at >100% real-time on the LC II ROM with all intercepts re-proven, or
+Finder runs on LC-II.ROM (colour, 68030) at a wall-clock feel comparable to the Classic
+build at 1-bit, with all intercepts re-proven, or
 Phase 3 alone reaches an acceptable feel and the user stops. Update this file's Status
 line and tick results after each phase; log the actual SPEED numbers achieved.
 
 ## Ground rules for future sessions
 
 - Build only via `cmd.exe //C "...\build.bat build|flash|monitor"` (v6.1 paths).
+- Debug emulation logic on the host harness first (`MacintoshESPEmulator/host/`, see its
+  README). Flash the board only to confirm a fix or to measure speed.
+- Decode `4E FA` as `JMP d16(PC)`. Two whole attempts were lost to misreading it.
 - Never raise `fast_slice` above 4000 (known deterministic crash).
 - CrsrNew only on position change; event-queue posting for clicks (CLAUDE.md CRITICALs).
 - One phase per session where possible; commit each phase separately so rollback is a

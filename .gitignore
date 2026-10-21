@@ -23,3 +23,9 @@ DebugLogs.txt
 
 # Claude Code local state
 .claude/
+
+# Serial captures and tool outputs
+tools/serial_watch.log
+tools/*_out.txt
+tools/_expert_paste.txt
+E:PersonalMacintosh*

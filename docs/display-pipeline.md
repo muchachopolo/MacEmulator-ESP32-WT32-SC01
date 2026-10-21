@@ -30,6 +30,27 @@ Mac RAM (1-bit framebuffer)
 └─────────────────────┘
 ```
 
+## Classic native 480x320 mode (CLASSIC_NATIVE_LCD, default ON)
+
+The Classic build patches the ROM so the Mac itself uses a 480x320 visible
+screen (Mini vMac "screen hack" precedent), and the renderer copies 1:1. The
+framebuffer layout is unchanged (ScrnBase = MemTop-$5900, rowBytes 64,
+512x342 bytes); columns 480-511 and rows 320-341 are unused margin.
+Patched immediate words (ROM file offsets, applied in mac_memory.c's ROM read
+paths):
+
+| Offset | Routine | Change |
+|--------|---------|--------|
+| $0060A / $0060E | InitCrsr globals (CrsrPin $0834) | 342/512 -> 320/480 |
+| $18F9A / $18FA0 | ScrnSize (JScrnSize $0810) | 342/512 -> 320/480 |
+| $18FB4 | _ScrnBitMap (InitGraf -> screenBits.bounds) | 342 -> 320 |
+
+It needs the corrected Classic VIA timer model (`CLASSIC_VIA_INTERP` +
+`CLASSIC_VIA_ECLOCK`, mac_via.c); without it a System Time Manager
+calibration divides by zero once the boot timing shifts. `CLASSIC_NATIVE_LCD=0`
+restores the scaled path below. Strips whose source bytes did not change
+are skipped (`MAC_VIDEO_DIRTY`, both builds).
+
 ## Scaling Algorithm
 
 The Mac's 512x342 resolution doesn't exactly fit the 480x320 display. We use nearest-neighbor scaling with precomputed lookup tables:
