@@ -281,10 +281,72 @@ def copy_folder_info(dst_img, src_img, paths=None):
         dst_img[voff + 22:voff + 54] = src_img[soff + 22:soff + 54]
 
 
+# Volume icon: a classic hard-disk ICN#/ics# drawn here (no Apple artwork),
+# stored as the invisible custom-icon file "Icon\r" in the root (resource
+# ID -16455, kCustomIconResource) with the root folder's kHasCustomIcon flag.
+HD_ICON_32 = [
+    '', '', '', '', '', '', '', '', '',
+    ' ##############################',
+    ' #............................##',
+    ' #............................##',
+    ' #............................##',
+    ' #............................##',
+    ' #............................##',
+    ' #............................##',
+    ' #............................##',
+    ' #............................##',
+    ' #..###.......................##',
+    ' #..###.......................##',
+    ' #............................##',
+    ' #............................##',
+    ' ##############################',
+    '  #############################',
+]
+HD_ICON_16 = [
+    '', '', '', '',
+    '###############',
+    '#.............##',
+    '#.............##',
+    '#.............##',
+    '#.##..........##',
+    '#.............##',
+    '###############',
+    ' ###############',
+]
+
+
+ADD_VOLUME_ICON = True
+
+
+def _bitmap(rows, w):
+    rows = rows + [''] * (w - len(rows))
+    icon = bytearray(); mask = bytearray()
+    for r in rows[:w]:
+        r = r.ljust(w)
+        ib = sum(1 << (w - 1 - i) for i, c in enumerate(r) if c == '#')
+        mb = sum(1 << (w - 1 - i) for i, c in enumerate(r) if c in '#.')
+        icon += ib.to_bytes(w // 8, 'big'); mask += mb.to_bytes(w // 8, 'big')
+    return bytes(icon + mask)
+
+
+def volume_icon_file(machfs, macresources):
+    f = machfs.File()
+    f.type, f.creator = b'icon', b'MACS'
+    f.flags = 0x4000                                  # invisible
+    f.rsrc = macresources.make_file([
+        macresources.Resource(b'ICN#', -16455, data=_bitmap(HD_ICON_32, 32)),
+        macresources.Resource(b'ics#', -16455, data=_bitmap(HD_ICON_16, 16)),
+    ])
+    return f
+
+
 def build(machfs, base, hd, extras, size, name, desktopdb=True):
     vol = machfs.Volume()
     vol.name = name
     vol.crdate = vol.mddate = base.crdate
+    if ADD_VOLUME_ICON:
+        import macresources
+        vol['Icon\r'] = volume_icon_file(machfs, macresources)
     for p in BASE_KEEP:
         put_path(machfs, vol, p, get_path(base, p))
     for special in ('Desktop Folder', 'Trash'):
@@ -411,6 +473,8 @@ def main():
                     help='build the Finder desktop database by booting the image '
                          'in the host harness (LC II build, needs LC-II.ROM next to '
                          '--out, WSL/Linux gcc); without it icons are generic')
+    ap.add_argument('--no-volume-icon', action='store_true',
+                    help='do not add the built-in hard-disk volume icon')
     ap.add_argument('--no-desktop', action='store_true',
                     help='omit the Desktop files and clear hasBeenInited, so the '
                          'Finder rebuilds the desktop (host --disk-rw prep step)')
@@ -443,6 +507,8 @@ def main():
     global MANIFEST
     MANIFEST = [m for m in MANIFEST if m[2][-1] not in a.exclude and
                 ('optional' not in m[3:] or m[2][-1] in a.include)]
+    global ADD_VOLUME_ICON
+    ADD_VOLUME_ICON = not a.no_volume_icon
     vol, img, items, dropped = build(machfs, base, hd, extras, size, a.name,
                                      desktopdb=not a.no_desktop)
 
@@ -458,6 +524,9 @@ def main():
     # could not be created" on the read-only volume).
     copy_folder_info(img, bp)
     dirs = catalog_dirs(img)
+    if ADD_VOLUME_ICON and () in dirs:
+        fl = dirs[()][1] + 22 + 8                 # root DInfo.frFlags
+        struct.pack_into('>H', img, fl, struct.unpack_from('>H', img, fl)[0] | 0x0400)
     for path, rect in FOLDER_WINDOWS.items():
         key = tuple(c.lower() for c in path)
         if key in dirs and dirs[key][1] is not None:

@@ -6,7 +6,9 @@
  *
  * Rendering strategy:
  *   - Precompute byte lookup table: each framebuffer byte -> 8 RGB565 pixels
- *   - Precompute X mapping tables for nearest-neighbor scaling
+ *   - Classic native mode copies 480x320 1:1; the scaled path (stock
+ *     CLASSIC_NATIVE_LCD=0, or the game full view) drops 1 pixel in 16
+ *     horizontally and samples rows through y_src_table
  *   - Convert and send CHUNK_LINES lines at a time to limit memory usage
  *   - Runs on a separate FreeRTOS task (core 0) to decouple from CPU emulation
  */
@@ -40,11 +42,6 @@ static const char *TAG = "mac_video";
  * byte_lut[b][0] = leftmost pixel (bit 7), byte_lut[b][7] = rightmost (bit 0).
  * Mac convention: 1 = black, 0 = white. */
 static uint16_t byte_lut[256][8];
-
-/* Precomputed X mapping: for each display X (0-479), the source byte index
- * and bit position within that byte. Avoids per-pixel division/shift. */
-static uint16_t x_byte_table[DISPLAY_WIDTH];
-static uint8_t  x_bit_table[DISPLAY_WIDTH];
 
 /* Y scaling: source line for each display line */
 static uint16_t y_src_table[DISPLAY_HEIGHT];
@@ -96,6 +93,8 @@ static inline void chunk_set_key(uint32_t key)
 }
 #endif
 
+volatile bool mac_full_view;
+
 static uint32_t g_scrn_base;
 static uint32_t g_fb_xor;
 static uint8_t g_fb0, g_fb1;
@@ -112,12 +111,8 @@ bool mac_video_init(void)
         }
     }
 
-    /* Precompute X mapping: 480 display pixels from 512 source pixels */
-    for (int dx = 0; dx < DISPLAY_WIDTH; dx++) {
-        int sx = (dx * MAC_SCREEN_WIDTH) / DISPLAY_WIDTH;
-        x_byte_table[dx] = sx >> 3;
-        x_bit_table[dx]  = sx & 7;
-    }
+    /* X scaling (512 -> 480, sx = dx*16/15) is folded into the render loop:
+     * 15 display pixels per 2 source bytes. */
 
     /* Precompute Y scaling: 320 display pixels from 342 source pixels */
     for (int dy = 0; dy < DISPLAY_HEIGHT; dy++) {
@@ -338,8 +333,15 @@ void mac_video_render(const uint8_t *mac_ram, uint32_t ram_size)
         g_fbdump[o] = 0;
     }
 
+    /* Scaled 512x342 -> 480x320 (stock CLASSIC_NATIVE_LCD=0, or the game
+     * full view) vs 1:1 top-left 480x320. Read once per render. */
+#if CLASSIC_NATIVE_LCD
+    const bool scaled = mac_full_view;
+#else
+    const bool scaled = true;
+#endif
 #if MAC_VIDEO_DIRTY
-    chunk_set_key(scrn_base);
+    chunk_set_key(scrn_base ^ (scaled ? 0x80000000u : 0));
     chunks_sent = 0;
 #endif
     /* Process display in chunks of CHUNK_LINES */
@@ -350,14 +352,14 @@ void mac_video_render(const uint8_t *mac_ram, uint32_t ram_size)
 #if MAC_VIDEO_DIRTY
         {
             uint32_t h = 2166136261u;
-#if CLASSIC_NATIVE_LCD
-            for (int dy = chunk_start; dy < chunk_end; dy++)
-                h = row_hash(h, screen + dy * MAC_SCREEN_STRIDE, DISPLAY_WIDTH / 8);
-#else
-            /* scaled: hash every source line this strip samples */
-            int y0 = y_src_table[chunk_start], y1 = y_src_table[chunk_end - 1];
-            h = row_hash(h, screen + y0 * MAC_SCREEN_STRIDE, (y1 - y0 + 1) * MAC_SCREEN_STRIDE);
-#endif
+            if (!scaled) {
+                for (int dy = chunk_start; dy < chunk_end; dy++)
+                    h = row_hash(h, screen + dy * MAC_SCREEN_STRIDE, DISPLAY_WIDTH / 8);
+            } else {
+                /* scaled: hash every source line this strip samples */
+                int y0 = y_src_table[chunk_start], y1 = y_src_table[chunk_end - 1];
+                h = row_hash(h, screen + y0 * MAC_SCREEN_STRIDE, (y1 - y0 + 1) * MAC_SCREEN_STRIDE);
+            }
             if (!chunk_dirty(chunk_start / CHUNK_LINES, h)) continue;
         }
 #endif
@@ -366,23 +368,33 @@ void mac_video_render(const uint8_t *mac_ram, uint32_t ram_size)
         uint16_t *out = line_buf;
 
         for (int dy = chunk_start; dy < chunk_end; dy++) {
-#if CLASSIC_NATIVE_LCD
-            /* Native 480x320: the Mac's visible screen is the top-left
-             * 480x320 of the 512x342 buffer, copied 1:1 (60 bytes/row). */
-            const uint8_t *src_line = screen + dy * MAC_SCREEN_STRIDE;
-            for (int i = 0; i < DISPLAY_WIDTH / 8; i++) {
-                const uint16_t *l = byte_lut[src_line[i]];
-                out[0] = l[0]; out[1] = l[1]; out[2] = l[2]; out[3] = l[3];
-                out[4] = l[4]; out[5] = l[5]; out[6] = l[6]; out[7] = l[7];
-                out += 8;
+            if (!scaled) {
+                /* Native 480x320: the Mac's visible screen is the top-left
+                 * 480x320 of the 512x342 buffer, copied 1:1 (60 bytes/row). */
+                const uint8_t *src_line = screen + dy * MAC_SCREEN_STRIDE;
+                for (int i = 0; i < DISPLAY_WIDTH / 8; i++) {
+                    const uint16_t *l = byte_lut[src_line[i]];
+                    out[0] = l[0]; out[1] = l[1]; out[2] = l[2]; out[3] = l[3];
+                    out[4] = l[4]; out[5] = l[5]; out[6] = l[6]; out[7] = l[7];
+                    out += 8;
+                }
+            } else {
+                /* Nearest-neighbour 512 -> 480: display x = 15k+j samples
+                 * source x = 16k+j (j < 15), i.e. each 16-pixel source pair
+                 * of bytes gives 15 pixels, dropping the last pixel (bit 0)
+                 * of the second byte. Same as sx = dx*512/480 per
+                 * pixel, at the cost of the 1:1 byte-LUT copy. */
+                const uint8_t *src_line = screen + y_src_table[dy] * MAC_SCREEN_STRIDE;
+                for (int i = 0; i < MAC_SCREEN_STRIDE; i += 2) {
+                    const uint16_t *a = byte_lut[src_line[i]];
+                    const uint16_t *b = byte_lut[src_line[i + 1]];
+                    out[0] = a[0]; out[1] = a[1]; out[2] = a[2]; out[3] = a[3];
+                    out[4] = a[4]; out[5] = a[5]; out[6] = a[6]; out[7] = a[7];
+                    out[8] = b[0]; out[9] = b[1]; out[10] = b[2]; out[11] = b[3];
+                    out[12] = b[4]; out[13] = b[5]; out[14] = b[6];
+                    out += 15;
+                }
             }
-#else
-            const uint8_t *src_line = screen + y_src_table[dy] * MAC_SCREEN_STRIDE;
-
-            for (int dx = 0; dx < DISPLAY_WIDTH; dx++) {
-                *out++ = byte_lut[src_line[x_byte_table[dx]]][x_bit_table[dx]];
-            }
-#endif
         }
 
         /* Send this chunk to the display */

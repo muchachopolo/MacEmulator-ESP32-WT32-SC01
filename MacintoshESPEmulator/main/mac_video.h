@@ -21,6 +21,11 @@ extern "C" {
  * precomputed nearest-neighbor lookup tables.
  */
 
+/* Classic GAME_FULL_VIEW: set by the emulation loop (core 1) while a
+ * full-screen game draws outside 480x320; the renderer (core 0) then shows
+ * the whole 512x342 buffer scaled to 480x320 instead of the 1:1 480x320. */
+extern volatile bool mac_full_view;
+
 /* Initialize video subsystem (precompute scale tables, allocate line buffer) */
 bool mac_video_init(void);
 

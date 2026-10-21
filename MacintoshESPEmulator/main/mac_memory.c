@@ -158,8 +158,37 @@ int v8_fetch_idx;
 #define CL_NAT_SPAN (0x18FB4 - 0x18F9A)
 #define CL_DS_LO   0x0155E   /* DSAlert window [$155E, $1669] */
 #define CL_DS_SPAN (0x01669 - 0x0155E)
+#if GAME_FULL_SCREENBITS
+/* Full-screen games that centre a fixed 512x342 field on screenBits
+ * (a full-screen game: with 480x320 bounds it draws at -16,-11 and loses 16 px
+ * left/right and 11 rows top/bottom). While such an app is the current
+ * process (CurApName $0910, Pascal string, prefix match), ScrnSize and
+ * _ScrnBitMap return the stock 342/512, so its InitGraf sees 512x342. The
+ * view itself switches by mac_emulator.c's full_view_track() (it draws into
+ * the margin, which the full view then shows). Only the immediate words at
+ * $18F9A/$18FA0/$18FB4 are affected; CrsrPin's boot-time words are not. */
+static const char *const full_screen_apps[] = {
+    "Crystal Quest",
+    "Prince of Persia",
+};
+bool mac_full_screen_app(void)
+{
+    if (!ram) return false;
+    int len = ram[0x0910];
+    if (len <= 0 || len > 31) return false;
+    for (unsigned i = 0; i < sizeof(full_screen_apps) / sizeof(full_screen_apps[0]); i++) {
+        int n = (int)strlen(full_screen_apps[i]);
+        if (len >= n && memcmp(ram + 0x0911, full_screen_apps[i], n) == 0) return true;
+    }
+    return false;
+}
+#endif
 static inline uint16_t classic_native_word(uint32_t off, uint16_t w)
 {
+#if GAME_FULL_SCREENBITS
+    if ((off == 0x18F9A || off == 0x18FA0 || off == 0x18FB4) && mac_full_screen_app())
+        return w;                                               /* stock 342/512 */
+#endif
     switch (off) {
     case 0x0060A: case 0x18F9A: case 0x18FB4: return 0x0140;   /* 320 */
     case 0x0060E: case 0x18FA0:               return 0x01E0;   /* 480 */

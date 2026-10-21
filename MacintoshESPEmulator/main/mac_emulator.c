@@ -178,6 +178,134 @@ static inline uint16_t rd16(const uint8_t *r, uint32_t a)
     return (uint16_t)((r[a] << 8) | r[a+1]);
 }
 
+/* ==== Classic full view for full-screen games (GAME_FULL_VIEW) ====
+ * The Classic runs native 480x320 (CLASSIC_NATIVE_LCD): the LCD shows the
+ * top-left 480x320 of the 512x342 frame buffer 1:1. A full-screen game that
+ * draws the whole 512x342 (or gets it via GAME_FULL_SCREENBITS) would lose
+ * its right 32 columns and bottom 22 rows, so while it runs the renderer
+ * shows the whole buffer scaled to 480x320 (mac_full_view, read by
+ * mac_video_render on core 0).
+ * Decision, once per frame at frame end (core 1):
+ *   candidate = game_mode_active() (cursor hidden, or a windowless non-Finder
+ *               app in front for ~1 s; see TOUCH_GAME_MODE)
+ *   margin    = hash of columns 480-511 (rows 0-319) + rows 320-341, every
+ *               4th frame (2.7 KB of frame buffer)
+ *   baseline  = the margin hash once it has been stable for 2 s while not a
+ *               candidate and not in full view (absorbs leftovers of an
+ *               earlier game, the boot-time grey, ...)
+ *   enter: candidate for FV_ENTER_FRAMES (0.5 s) AND margin != baseline
+ *          (games that keep to the 480x320 screenBits stay crisp 1:1)
+ *   leave: not a candidate for FV_LEAVE_FRAMES (1 s)
+ * In full view CrsrPin ($0834) is 0,0,342,512, the touch cursor may reach
+ * 512x342 and finger movement is scaled by 512/480 x 342/320 so the cursor
+ * follows the finger on the scaled picture. Leaving restores CrsrPin and
+ * clamps the cursor into 480x320. The emulation core is unchanged: no
+ * patch is applied to the game, only the view and the cursor bounds. */
+#if GAME_FULL_VIEW && TOUCH_GAME_MODE
+#define FV_ENTER_FRAMES  30
+#define FV_LEAVE_FRAMES  60
+#define FV_STABLE_SAMPLES 30   /* x 4 frames = 2 s */
+#endif
+static int mac_vis_w = MAC_VIS_WIDTH, mac_vis_h = MAC_VIS_HEIGHT;
+#if GAME_FULL_VIEW && TOUCH_GAME_MODE
+static int fv_acc_x, fv_acc_y;          /* touch scaling remainders */
+static uint8_t fv_saved_pin[8];         /* CrsrPin before full view */
+
+static uint32_t fv_margin_hash(const uint8_t *r)
+{
+    uint32_t ram_size = mac_mem_get_ram_size();
+    uint32_t sb = rd32(r, 0x0824);
+    if (sb == 0) sb = ram_size - 0x5900;
+    else if (sb >= ram_size) sb &= ram_size - 1;
+    if (sb + MAC_SCREEN_SIZE > ram_size) return 0;
+    const uint8_t *scr = r + sb;
+    uint32_t h = 2166136261u;
+    for (int y = 0; y < MAC_VIS_HEIGHT; y++) {
+        const uint8_t *p = scr + y * MAC_SCREEN_STRIDE + MAC_VIS_WIDTH / 8;
+        for (int i = 0; i < (MAC_SCREEN_WIDTH - MAC_VIS_WIDTH) / 8; i++)
+            h = (h ^ p[i]) * 16777619u;
+    }
+    const uint8_t *p = scr + MAC_VIS_HEIGHT * MAC_SCREEN_STRIDE;
+    for (int i = 0; i < (MAC_SCREEN_HEIGHT - MAC_VIS_HEIGHT) * MAC_SCREEN_STRIDE; i++)
+        h = (h ^ p[i]) * 16777619u;
+    return h;
+}
+
+static void full_view_set(uint8_t *r, bool on, int frame)
+{
+    if (on) {
+        memcpy(fv_saved_pin, r + 0x0834, 8);
+        wr16(r, 0x0834, 0); wr16(r, 0x0836, 0);                 /* top, left */
+        wr16(r, 0x0838, MAC_SCREEN_HEIGHT);                     /* bottom */
+        wr16(r, 0x083A, MAC_SCREEN_WIDTH);                      /* right */
+        mac_vis_w = MAC_SCREEN_WIDTH;
+        mac_vis_h = MAC_SCREEN_HEIGHT;
+    } else {
+        memcpy(r + 0x0834, fv_saved_pin, 8);
+        /* never leave a pin larger than the native screen */
+        if (rd16(r, 0x0838) > MAC_VIS_HEIGHT || rd16(r, 0x083A) > MAC_VIS_WIDTH) {
+            wr16(r, 0x0834, 0); wr16(r, 0x0836, 0);
+            wr16(r, 0x0838, MAC_VIS_HEIGHT); wr16(r, 0x083A, MAC_VIS_WIDTH);
+        }
+        mac_vis_w = MAC_VIS_WIDTH;
+        mac_vis_h = MAC_VIS_HEIGHT;
+        mac_emu_set_mouse(mouse_x, mouse_y, mouse_button);    /* clamp */
+    }
+    fv_acc_x = fv_acc_y = 0;
+    mac_full_view = on;
+    ESP_LOGI(TAG, "FULL-VIEW %s F%d (CurApName len %d, CrsrState %d, mouse %d,%d)",
+             on ? "ON: 512x342 scaled" : "OFF: 480x320 1:1", frame, r[0x0910],
+             (int16_t)rd16(r, 0x08D0), mouse_x, mouse_y);
+}
+
+static void full_view_track(uint8_t *r, int frame)
+{
+    static int on_cnt, off_cnt, stable;
+    static uint32_t base_h, last_h;
+    static bool have_base;
+    if (!r || !mac_post_boot) return;
+    uint32_t wmgr = rd32(r, 0x09DE);
+    if (wmgr == 0xFFFFFFFF || wmgr == 0) return;
+
+    bool cand = game_mode_active();
+    if ((frame & 3) == 0) {
+        uint32_t h = fv_margin_hash(r);
+        if (!cand && !mac_full_view) {
+            if (h == last_h) {
+                if (stable < FV_STABLE_SAMPLES) stable++;
+                else if (!have_base || base_h != h) { base_h = h; have_base = true; }
+            } else {
+                stable = 0;
+            }
+        } else {
+            stable = 0;
+        }
+        last_h = h;
+    }
+    if (cand) { if (on_cnt < FV_ENTER_FRAMES) on_cnt++; off_cnt = 0; }
+    else      { if (off_cnt < FV_LEAVE_FRAMES) off_cnt++; on_cnt = 0; }
+
+    if (!mac_full_view) {
+        if (on_cnt >= FV_ENTER_FRAMES && have_base && last_h != base_h)
+            full_view_set(r, true, frame);
+    } else if (off_cnt >= FV_LEAVE_FRAMES) {
+        full_view_set(r, false, frame);
+    }
+}
+
+/* Finger movement (LCD pixels) -> Mac pixels on the scaled picture. */
+static void full_view_scale(int *dx, int *dy)
+{
+    if (!mac_full_view) return;
+    fv_acc_x += *dx * MAC_SCREEN_WIDTH;
+    *dx = fv_acc_x / DISPLAY_WIDTH;
+    fv_acc_x -= *dx * DISPLAY_WIDTH;
+    fv_acc_y += *dy * MAC_SCREEN_HEIGHT;
+    *dy = fv_acc_y / DISPLAY_HEIGHT;
+    fv_acc_y -= *dy * DISPLAY_HEIGHT;
+}
+#endif
+
 #if !MAC_ROM_LC_II && !CLASSIC_MOUSE_POSTEVENT
 /* Check if a given address is currently in the active event queue */
 static bool evt_in_queue(const uint8_t *r, uint32_t target)
@@ -3632,6 +3760,10 @@ void mac_emu_run(void *param)
 #if TOUCH_GAME_MODE
             game_mode_track(mac_mem_get_ram());
 #endif
+#if GAME_FULL_VIEW && TOUCH_GAME_MODE
+            full_view_track(mac_mem_get_ram(), frame_count);
+            full_view_scale(&tr.dx, &tr.dy);
+#endif
 #if MAC_ROM_LC_II
             v8_apply_touch(&tr, frame_count);
 #else
@@ -3694,9 +3826,9 @@ const uint8_t *mac_emu_get_screen(void)
 void mac_emu_set_mouse(int x, int y, bool button)
 {
     if (x < 0) x = 0;
-    if (x >= MAC_VIS_WIDTH) x = MAC_VIS_WIDTH - 1;
-    if (y < 0) y = 0;
-    if (y >= MAC_VIS_HEIGHT) y = MAC_VIS_HEIGHT - 1;
+    if (x >= mac_vis_w) x = mac_vis_w - 1;      /* 480x320, or 512x342 in */
+    if (y < 0) y = 0;                           /* the game full view     */
+    if (y >= mac_vis_h) y = mac_vis_h - 1;
 
     mouse_x = x;
     mouse_y = y;

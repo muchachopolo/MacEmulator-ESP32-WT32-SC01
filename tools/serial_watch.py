@@ -19,7 +19,7 @@ while True:
     if not line:
         empty += 1
         if empty == 100:
-            print("[serial] no bytes coming from COM7 for ~10s", flush=True)
+            print("[serial] no bytes coming from COM3 for ~10s", flush=True)
         if empty > 100:
             time.sleep(0.1)
         continue

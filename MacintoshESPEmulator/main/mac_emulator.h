@@ -46,6 +46,34 @@ extern "C" {
 #ifndef CLASSIC_VIA_IRQ_NOW
 #define CLASSIC_VIA_IRQ_NOW 1
 #endif
+/* Classic full view for full-screen games (GAME_FULL_VIEW, default 1; only
+ * with CLASSIC_NATIVE_LCD on the Classic build, needs TOUCH_GAME_MODE).
+ * While touch game mode is active (cursor hidden or a windowless app in
+ * front, with hysteresis) AND the game has drawn into the 512x342 margin
+ * (columns 480-511 / rows 320-341), the renderer shows the whole 512x342
+ * buffer scaled to 480x320, CrsrPin ($0834) is widened to 0,0,342,512 and
+ * touch movement is scaled by 512/480 x 342/320. Leaving game mode returns
+ * to the crisp 1:1 480x320 view (mac_emulator.c full_view_track()).
+ * GAME_FULL_SCREENBITS (default = GAME_FULL_VIEW): apps whose name starts
+ * with an entry of the list in mac_memory.c (a full-screen game, Prince of
+ * Persia ...) get the stock 512x342 from _ScrnBitMap / ScrnSize, so a game
+ * that centres its fixed 512x342 field on screenBits (a full-screen game) is not
+ * cut off at all four edges. */
+#ifndef GAME_FULL_VIEW
+#define GAME_FULL_VIEW 1
+#endif
+#if !CLASSIC_NATIVE_LCD || MAC_ROM_LC_II
+#undef  GAME_FULL_VIEW
+#define GAME_FULL_VIEW 0
+#endif
+#ifndef GAME_FULL_SCREENBITS
+#define GAME_FULL_SCREENBITS GAME_FULL_VIEW
+#endif
+#if !CLASSIC_NATIVE_LCD || MAC_ROM_LC_II
+#undef  GAME_FULL_SCREENBITS
+#define GAME_FULL_SCREENBITS 0
+#endif
+
 #if CLASSIC_NATIVE_LCD && !MAC_ROM_LC_II
 #define MAC_VIS_WIDTH       480
 #define MAC_VIS_HEIGHT      320
