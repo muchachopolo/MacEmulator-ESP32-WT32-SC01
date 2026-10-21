@@ -271,6 +271,23 @@ Steps:
       (`CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP` already set). Off by default.
 - Order: 6a → 6b → 6c and/or 6d → 6e. Pin budget decides 6c vs 6d for input.
 
+## Step 7 — Raspberry Pi 1 bare-metal port (planned 2026-10-21)
+
+Full plan: [`raspberry-pi-port.md`](raspberry-pi-port.md). Run the same core on a
+Raspberry Pi 1 with the user's 3.5" SPI touch shield (likely ILI9486 480×320 +
+XPT2046 resistive touch), booting `kernel.img` from the SD card without an OS
+(Circle framework suggested). Needs from the user: exact Pi model and shield
+model/photo. Shares the ADB keyboard work with Step 6b.
+
+## Step 2e — LC II game full view (in progress 2026-10-21)
+
+- [ ] V8 equivalent of the Classic full view: present 512×384/512×342 to listed
+      full-screen apps (main GDevice/PixMap bounds), render scaled to 480×320;
+      investigate the "error of type 29" quit of a game on the LC II.
+- [ ] LC II colour: boot in 256 colours (Egret PRAM video mode), make the
+      Monitors control panel work with the V8 video emulation, verify the panel's
+      colour byte order on the board.
+
 ## Ground rules
 
 - Debug logic on the host harness first; flash only to confirm or to measure.
