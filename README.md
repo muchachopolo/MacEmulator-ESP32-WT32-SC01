@@ -87,24 +87,22 @@ ROM/
 └── OS_750_boot.dsk    bootable System 7.5.3 floppy (1.44 MB)
 ```
 
-### 2. (Optional) Build a bigger boot disk
+### 2. Build the custom boot disk
 
-`tools/build_disk.py` makes a 2880K HFS volume from images you supply: System
-and Finder from the boot floppy, Apple menu items and control panels from a
-full System 7.5.3 hard-disk image, plus your own apps (MacBinary or HFS images).
-It needs Python 3 and `pip install machfs`.
+The default build embeds `ROM/custom_753.dsk`, a 2880K System 7.5.3 disk with
+the desk accessories, control panels and the apps you choose. Build it from
+images you supply with `tools/build_disk.py` (Python 3 + `pip install machfs`):
 
 ```bash
 python3 tools/build_disk.py ROM/OS_750_boot.dsk \
-    --hd "/path/System 7.5.3 HD.dsk" --extra ~/macapps --prep \
-    --out ROM/custom_753.dsk
+    --hd "/path/System 7.5.3 HD.dsk" \
+    --extra-file "/path/Game.dsk" "My Game" --silence-sounds \
+    --prep --out ROM/custom_753.dsk
 ```
 
-`--prep` boots the new disk once in the host harness (Linux/WSL, needs
-`LC-II.ROM`) so the Finder builds its desktop database. Without it, icons are
-generic. The volume gets a built-in hard-disk icon (`--no-volume-icon` to
-skip it). The size is limited by flash: about 2.89 MB is left for the disk.
-Details: [`docs/build-guide.md`](docs/build-guide.md#custom-boot-disk).
+**Step-by-step guide, all options and the space budget:
+[docs/custom-disk.md](docs/custom-disk.md).** Without the custom disk the
+build falls back to the plain `OS_750_boot.dsk` floppy.
 
 ### 3. Choose the machine and the disk
 
@@ -219,7 +217,8 @@ measurements behind each step:
 |---|---|
 | [`docs/learn/`](docs/learn/README.md) | Learning guide: hardware, emulated Macs, CPU, performance case study, lessons |
 | [`docs/architecture-overview.md`](docs/architecture-overview.md) | Tasks, frame loop, source map, both machines |
-| [`docs/build-guide.md`](docs/build-guide.md) | Toolchain, build variables, custom disk, troubleshooting |
+| [`docs/build-guide.md`](docs/build-guide.md) | Toolchain, build variables, troubleshooting |
+| [`docs/custom-disk.md`](docs/custom-disk.md) | How to build the custom boot disk (required for the default build) |
 | [`docs/hardware.md`](docs/hardware.md) | Board, pins, memory limits |
 | [`docs/memory-map.md`](docs/memory-map.md) | Classic and V8 address maps, low-memory globals |
 | [`docs/musashi-integration.md`](docs/musashi-integration.md) | CPU core, 68030/PMMU stub, native speed-ups |

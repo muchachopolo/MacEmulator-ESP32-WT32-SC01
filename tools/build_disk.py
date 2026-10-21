@@ -215,6 +215,54 @@ def collect_extras(machfs, paths):
             print(f'  skip extra {p} (unknown type)')
 
 
+def collect_extra_files(machfs, pairs):
+    """Yield (name, node) for each --extra-file IMAGE NAME: one top-level
+    item copied from an HFS image (leaves read-mes and unused files out)."""
+    vols = {}
+    for img, name in pairs:
+        if img not in vols:
+            vols[img] = read_volume(machfs, img)
+        if name not in vols[img]:
+            raise SystemExit(f'--extra-file: "{name}" not found in {img} '
+                             f'(top level has: {", ".join(vols[img].keys())})')
+        yield name, vols[img][name]
+
+
+# Minimal valid format-1 'snd ' (sampledSynth/initMono, one bufferCmd, two
+# silent samples): keeps every resource ID an app asks for, plays nothing.
+SILENT_SND = (struct.pack('>HHHIH', 1, 1, 5, 0x80, 1) + struct.pack('>HHI', 0x8051, 0, 20)
+              + struct.pack('>IIIIIBB', 0, 2, 0x56EE8BA3, 0, 0, 0, 0x3C) + b'\x80\x80')
+
+
+def silence_sounds(machfs, extras):
+    """--silence-sounds: replace 'snd ' resources of added apps/files (and
+    of files inside added folders) with SILENT_SND. The board has no audio."""
+    import macresources
+    saved = 0
+
+    def fix(node):
+        nonlocal saved
+        if isinstance(node, machfs.Folder):
+            for c in node.values():
+                fix(c)
+            return
+        if not node.rsrc:
+            return
+        res = list(macresources.parse_file(node.rsrc))
+        hit = False
+        for r in res:
+            if r.type == b'snd ' and len(r.data) > len(SILENT_SND):
+                saved += len(r.data) - len(SILENT_SND)
+                r.data = SILENT_SND
+                hit = True
+        if hit:
+            node.rsrc = macresources.make_file(res)
+
+    for _, node in extras:
+        fix(node)
+    print(f'  --silence-sounds: {saved / 1024:.1f} K of sound data removed')
+
+
 # ---------------------------------------------------------------------------
 def catalog_dirs(img):
     """Map folder path tuple (lowercase) -> (dirID, byte offset of its
@@ -473,6 +521,13 @@ def main():
                     help='build the Finder desktop database by booting the image '
                          'in the host harness (LC II build, needs LC-II.ROM next to '
                          '--out, WSL/Linux gcc); without it icons are generic')
+    ap.add_argument('--extra-file', nargs=2, action='append', default=[],
+                    metavar=('IMAGE', 'NAME'),
+                    help='copy only top-level item NAME from HFS image IMAGE '
+                         'into the apps folder (repeatable)')
+    ap.add_argument('--silence-sounds', action='store_true',
+                    help="replace 'snd ' resources of added apps with a silent "
+                         'sound (the board has no audio; saves space)')
     ap.add_argument('--no-volume-icon', action='store_true',
                     help='do not add the built-in hard-disk volume icon')
     ap.add_argument('--no-desktop', action='store_true',
@@ -491,6 +546,9 @@ def main():
     base = read_volume(machfs, a.base)
     hd = read_volume(machfs, a.hd) if a.hd else None
     extras = list(collect_extras(machfs, a.extra))
+    extras += list(collect_extra_files(machfs, a.extra_file))
+    if a.silence_sounds:
+        silence_sounds(machfs, extras)
     if a.prep:
         a.no_desktop = True
     if a.no_desktop:

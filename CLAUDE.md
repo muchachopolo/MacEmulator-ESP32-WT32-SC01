@@ -56,7 +56,7 @@ One codebase, two machine targets, picked in `main/CMakeLists.txt`:
 
 `DISK_NAME` (default `custom_753.dsk`, falling back to `OS_750_boot.dsk` if
 absent) selects the disk image in `ROM/`; `DISK_SYM` is its C identifier.
-`custom_753.dsk` (2880K) comes from `tools/build_disk.py` (keep your build command locally in `ROM/`; host harness default stays
+`custom_753.dsk` (2880K) comes from `tools/build_disk.py` — user guide: `docs/custom-disk.md` (keep your build command locally in `ROM/`; host harness default stays
 LC II + `OS_750_boot.dsk`, see host/README.md). ROM checksums: Classic `A49F9914`, LC II `35C28F5F`,
 Color Classic `ECD99DC0`.
 

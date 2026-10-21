@@ -98,38 +98,20 @@ example `_binary_OS_750_boot_dsk_start`).
 
 ## Custom boot disk
 
-`tools/build_disk.py` builds a bare HFS System 7.5.3 volume. It contains no
-Apple data: everything is copied from images you supply.
+The default `DISK_NAME` is `custom_753.dsk`, built with `tools/build_disk.py`
+from images you supply (no Apple data in the repo). **Full guide:
+[custom-disk.md](custom-disk.md)** — sources needed, commands, every option
+(`--hd`, `--extra`, `--extra-file IMAGE NAME`, `--silence-sounds`,
+`--exclude/--include`, `--size`, `--prep`, `--no-volume-icon`) and the space
+budget. Notes for developers:
 
-- From the **base** floppy: System, Finder, Finder Preferences, boot blocks.
-- From `--hd` (a full 7.5.3 hard-disk image, bare HFS or partitioned): the
-  `MANIFEST` items (Calculator, Key Caps, Note Pad, Scrapbook, Shut Down,
-  control panels, SimpleText, ...).
-- From `--extra` (repeatable): your apps as MacBinary `.bin` files, HFS images
-  or folders of them, copied to `Applications`.
-- A built-in hard-disk volume icon (`--no-volume-icon` skips it), Finder
-  window positions that fit 480×320, and a Control Panels alias in the Apple menu.
-
-```bash
-pip install machfs            # or --pylib DIR with an unpacked machfs/macresources
-python3 tools/build_disk.py ROM/OS_750_boot.dsk --hd "/path/System 7.5.3 HD.dsk" \
-    [--extra ~/macapps] [--size 2880K|floppy|<n>K] [--exclude NAME] [--include NAME] \
-    [--name "Macintosh HD"] [--prep] [--out ROM/custom_753.dsk]
-```
-
-- `--size`: default 2880K, the most that fits the flash budget (~2.89 MB =
-  app partition minus code and the 512 KB ROM). `floppy` = 1440K, dropping the
-  lowest-priority manifest items until the volume fits.
-- `--prep` (recommended; WSL/Linux with gcc): boots the new image once in the
-  host harness (LC II build; `LC-II.ROM` must be in the output folder) with the
-  disk writable, lets the Finder build the desktop database, and shuts down
-  cleanly. Without it the Finder shows generic icons.
-- `--include WindowShade`: optional, because its INIT corrupts memory on the
-  Classic build (General Controls then crashes). It works on the LC II.
-
-Keep your own build command (which apps, which exclusions) in a local script next to the images in `ROM/`, which is git-ignored. `DISK_NAME "custom_753.dsk"` is already the default (host: `make DISK_NAME=custom_753.dsk
-BUILD=build_cd`). Any size up to the flash budget mounts through the floppy
-path (.Sony drive 1) on both machines.
+- Any volume up to the flash budget (~2.89 MB) mounts through the floppy path
+  (.Sony drive 1) on both machines; the host harness takes
+  `make DISK_NAME=custom_753.dsk BUILD=build_cd`.
+- `--include WindowShade` is optional because its INIT corrupts memory on the
+  Classic build (General Controls then crashes); it works on the LC II.
+- `--prep` runs the LC II host harness with the disk writable
+  (`--disk-rw`); `LC-II.ROM` must be in the output folder.
 
 ## Host harness
 
