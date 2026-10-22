@@ -194,8 +194,10 @@ static void unsolicited_untake(void)
 {
     if (eg.unsol_tick) {
         if (eg.ticks_pending < 4) eg.ticks_pending++;
+#if MAC_KEYBOARD
     } else if (eg.unsol_kbd) {
         kbd_adb_untake();
+#endif
     } else {
         mouse_untake();
     }
