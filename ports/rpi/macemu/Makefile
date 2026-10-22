@@ -16,9 +16,13 @@ CIRCLEHOME ?= $(HOME)/tools/circle
 EMU        := ../../../MacintoshESPEmulator
 
 MAC_ROM_LC_II ?= 0
+# Mac RAM: the ESP32 build has 2 MB (its PSRAM budget). The Pi gives the LC II
+# 8 MB, so System 7.5.3 leaves room for big applications. The Classic stays at
+# 2 MB for now (its ROM boot workarounds assume that layout).
 ifeq ($(MAC_ROM_LC_II),1)
 MACHINE    := lc2
 TARGET     := kernel7-lc2
+MAC_RAM_SIZE ?= 0x800000
 else
 MACHINE    := classic
 TARGET     := kernel7
@@ -42,7 +46,7 @@ OBJS	= $(addprefix $(O)/,$(PI_SRCS:.cpp=.o)) $(O)/syscalls.o \
 # supplies the ROM and disk at run time (MAC_EXTERNAL_IMAGES) and a USB keyboard
 # (MAC_KEYBOARD).
 EMU_DEFS = -DHOST_BUILD=1 -DMAC_FRAME_THROTTLE=1 -DMAC_EXTERNAL_IMAGES=1 -DHAS_DISK_IMAGE=1 \
-	   -DMAC_KEYBOARD=1 \
+	   -DMAC_KEYBOARD=1 $(if $(MAC_RAM_SIZE),-DMAC_RAM_SIZE=$(MAC_RAM_SIZE),) \
 	   -DMAC_ROM_LC_II=$(MAC_ROM_LC_II) -DMAC_V8_CUDA=0 $(EXTRA_DEFS)
 
 EXTRAINCLUDE = -I shim -I ../common -I $(EMU)/main -I $(EMU)/components/musashi \
