@@ -44,6 +44,7 @@ public:
 	CCPUThrottle *GetCPUThrottle (void) { return &m_CPUThrottle; }
 	CUSBInput *GetUSBInput (void) { return &m_USBInput; }
 	CLogFile *GetLogFile (void) { return &m_LogFile; }
+	boolean IsLogEnabled (void) const { return m_bLog; }	// /mac/config.txt log=1
 
 	// Write the blocks the Mac changed back to the disk image file.
 	// bForce: also when the last write is recent (restart, shutdown).
@@ -84,6 +85,7 @@ private:
 	CUSBHCIDevice		m_USBHCI;
 	CUSBInput		m_USBInput;
 
+	boolean		m_bLog;				// /mac/config.txt "log=1"
 	char		m_DiskName[64];			// /mac/config.txt "disk="
 	u8		*m_pDisk;			// pristine copy = what the file holds
 	unsigned	m_nDiskSize;

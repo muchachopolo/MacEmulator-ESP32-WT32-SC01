@@ -29,7 +29,7 @@ ESP32's core-0 tasks. Only core 1 uses SPI0. The ARM runs at its maximum clock.
 /kernel7.img /kernel7-lc2.img
 /mac/Classic.ROM          (LC-II.ROM for the LC II build)
 /mac/custom_753.dsk       (any HFS disk image up to the floppy-path limit)
-/mac/config.txt           optional: disk=<file name in /mac>
+/mac/config.txt           optional: disk=<file in /mac>, disk2=<file> (LC II), log=1
 ```
 
 Without `disk=` the Mac boots `custom_753.dsk`, else `OS_750_boot.dsk`, else
@@ -37,7 +37,9 @@ shows the "?" floppy. The whole image is loaded into RAM; blocks the Mac writes
 are written back to the file about one second after the Mac stops writing (at
 most every 10 s while it keeps writing) and before a restart, so saved files
 survive power-off. A red screen with a number means: 1 = no SD card/FAT, 2 = ROM
-missing, 3 = emulator init failed.
+missing, 3 = emulator init failed, 9 = crash. `log=1` writes everything to
+`/mac/log.txt` (every 30 s); with the default `log=0` only errors are kept and the
+file is written only on a crash, since every SD write briefly pauses the Mac.
 
 ## Build
 

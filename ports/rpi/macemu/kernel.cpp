@@ -88,6 +88,7 @@ CKernel::CKernel (void)
 	m_nDisk2LastWrite (0)
 {
 	s_pThis = this;
+	m_bLog = FALSE;
 	m_DiskName[0] = 0;
 	m_Disk2Name[0] = 0;
 	m_ActLED.Blink (3);
@@ -208,6 +209,10 @@ void CKernel::ReadConfig (void)
 		{
 			memcpy (m_DiskName, &pText[i + 5], nLen - 5);
 			m_DiskName[nLen - 5] = 0;
+		}
+		else if (nLen == 5 && strncmp (&pText[i], "log=", 4) == 0)
+		{
+			m_bLog = pText[i + 4] == '1';
 		}
 		else if (nLen > 6 && strncmp (&pText[i], "disk2=", 6) == 0 && nLen - 6 < sizeof m_Disk2Name)
 		{
@@ -362,8 +367,11 @@ boolean CKernel::LoadImages (void)
 	mac_ext_rom_size = nROMSize;
 
 	ReadConfig ();
-	m_Logger.Write (From, LogNotice, "disk setting: \"%s\"", m_DiskName);
-	m_LogFile.Save (TRUE);
+	m_Logger.Write (From, LogNotice, "disk setting: \"%s\", log %s", m_DiskName, m_bLog ? "on" : "off");
+	if (m_bLog)
+	{
+		m_LogFile.Save (TRUE);
+	}
 	for (unsigned i = 0; !m_pDisk && i <= sizeof DefaultDisks / sizeof DefaultDisks[0]; i++)
 	{
 		if (i > 0)
@@ -520,7 +528,10 @@ TShutdownMode CKernel::Run (void)
 		if (m_bMounted) m_LogFile.Save (TRUE);
 		return ShutdownHalt;
 	}
-	m_LogFile.Save (TRUE);
+	if (m_bLog)
+	{
+		m_LogFile.Save (TRUE);
+	}
 	if (!mac_emu_init ())
 	{
 		m_Logger.Write (From, LogError, "emulator init failed");
@@ -528,7 +539,10 @@ TShutdownMode CKernel::Run (void)
 		ShowError (ErrorInit);
 		return ShutdownHalt;
 	}
-	m_LogFile.Save (TRUE);
+	if (m_bLog)
+	{
+		m_LogFile.Save (TRUE);
+	}
 	if (!m_VideoCore.Initialize ())				// starts core 1
 	{
 		m_Logger.Write (From, LogPanic, "cannot start core 1");

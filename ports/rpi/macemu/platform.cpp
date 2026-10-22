@@ -29,6 +29,10 @@ void pi_delay_ms (unsigned ms)
 void pi_log (int level, const char *tag, const char *fmt, ...)
 {
 	char Buf[256];
+	if (level > 1 && !CKernel::Get ()->IsLogEnabled ())
+	{
+		return;					// log=0: errors only (kept for a panic)
+	}
 	va_list ap;
 	va_start (ap, fmt);
 	vsnprintf (Buf, sizeof Buf, fmt, ap);
@@ -52,7 +56,7 @@ void pi_frame_hook (void)
 	static u64 LastThrottle, LastLogSave;
 	u64 Now = CTimer::GetClockTicks64 ();
 	pi_frame_count++;
-	if (Now - LastLogSave >= 30000000)		// SD writes pause the Mac: rarely
+	if (CKernel::Get ()->IsLogEnabled () && Now - LastLogSave >= 30000000)	// SD writes pause the Mac
 	{
 		LastLogSave = Now;
 		CKernel::Get ()->GetLogFile ()->Save ();
