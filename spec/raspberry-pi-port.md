@@ -143,7 +143,12 @@ Higher SPI clocks are often possible on these shields — measure.
       up (touch is ignored until WMgrPort is valid, as on the ESP32). Boot time
       not yet measured.
 - [ ] **R4. Input**: touch → `mac_touch.c` (trackpad + absolute modes);
-      USB mouse; USB keyboard → ADB keyboard (shares plan step 6b).
+      USB mouse; USB keyboard → ADB keyboard (shares plan step 6b). Built
+      (2b80265): `MAC_KEYBOARD` core keyboard (LC II: ADB keyboard at address 2
+      on the Egret HLE; Classic: mirror of the ROM keyboard handler), host
+      `--type/--key` (both machines type a folder name), Pi `usbinput.cpp`
+      (Circle USB HID → ADB codes, mouse → `touch_mouse_input`). Awaiting the
+      test with a real USB keyboard/mouse. Absolute touch mode still open.
 - [x] **R5. Storage**: writable disk images on SD (write-back, flush at Shut
       Down), disk/ROM selection via `/mac/config.txt`. **Done:**
       `MAC_EXTERNAL_IMAGES`, `/mac/config.txt disk=`, write-back of changed
