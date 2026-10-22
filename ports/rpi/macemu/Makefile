@@ -23,6 +23,9 @@ ifeq ($(MAC_ROM_LC_II),1)
 MACHINE    := lc2
 TARGET     := kernel7-lc2
 MAC_RAM_SIZE ?= 0x800000
+# Full LC II CPU speed: the ESP32 halves the 68030's cycles per frame
+# (MAC_V8_CYCLE_SCALE=2) to keep up; the Pi has the headroom.
+LC2_DEFS   := -DMAC_V8_CYCLE_SCALE=1
 else
 MACHINE    := classic
 TARGET     := kernel7
@@ -47,7 +50,7 @@ OBJS	= $(addprefix $(O)/,$(PI_SRCS:.cpp=.o)) $(O)/syscalls.o \
 # (MAC_KEYBOARD).
 EMU_DEFS = -DHOST_BUILD=1 -DMAC_FRAME_THROTTLE=1 -DMAC_BOOT_TURBO=1 -DMAC_EXTERNAL_IMAGES=1 -DHAS_DISK_IMAGE=1 \
 	   -DMAC_KEYBOARD=1 -DMAC_DRIVE2=1 $(if $(MAC_RAM_SIZE),-DMAC_RAM_SIZE=$(MAC_RAM_SIZE),) \
-	   -DMAC_ROM_LC_II=$(MAC_ROM_LC_II) -DMAC_V8_CUDA=0 $(EXTRA_DEFS)
+	   -DMAC_ROM_LC_II=$(MAC_ROM_LC_II) -DMAC_V8_CUDA=0 $(LC2_DEFS) $(EXTRA_DEFS)
 
 EXTRAINCLUDE = -I shim -I ../common -I $(EMU)/main -I $(EMU)/components/musashi \
 	       -I $(EMU)/components/display/include
