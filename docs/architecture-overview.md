@@ -24,6 +24,31 @@ The Color Classic ROM (`MAC_V8_CUDA=1`, Cuda instead of Egret) uses the same V8
 code and is kept as a reference. Most V8 code is shared; Classic-only code is
 under `#if !MAC_ROM_LC_II`.
 
+## Ports: the same core elsewhere
+
+The emulator core (`main/*.c` + Musashi) has no direct ESP-IDF dependency
+beyond a few headers, so it also builds as:
+
+- **the PC host harness** (`MacintoshESPEmulator/host/`, `HOST_BUILD=1`),
+  single-threaded and deterministic, for debugging;
+- **the Raspberry Pi 2 port** (`ports/rpi/macemu/`, bare metal with Circle):
+  core 0 runs the 68k, core 1 renders and samples touch, core 2 does all SD
+  card access. See [`ports/rpi/README.md`](../ports/rpi/README.md) and
+  [learning chapter 9](learn/09-raspberry-pi-port.md).
+
+Hooks the core offers to a platform, all off by default (ESP32 unchanged):
+
+| Hook / switch | Purpose |
+|---|---|
+| `MAC_EXTERNAL_IMAGES`, `mac_ext_rom`/`mac_ext_disk` | ROM and disk handed over at run time instead of linked-in symbols |
+| `disk_ov_fill` (function pointer, NULL = image complete) | Called before the disk overlay reads image bytes: load them on demand |
+| `disk_ov_write_count()`, `disk_ov_next_written()` | Find the blocks the Mac wrote, to save them |
+| `MAC_DRIVE2`, `v8disk_set_drive2()` | A second disk on the LC II (drive 2 of .Sony, I/O callback) |
+| `MAC_KEYBOARD`, `kbd_key()` | Keyboard input as ADB key codes |
+| `touch_mouse_input()` | A relative mouse besides the touch panel |
+| `MAC_BOOT_TURBO` | No real-time cap until the Finder is up |
+| `MAC_RAM_SIZE`, `MAC_V8_CYCLE_SCALE` | More RAM, full LC II CPU speed where the host can afford it |
+
 ## Task model
 
 ```
@@ -52,7 +77,8 @@ One frame = one 60.15 Hz VBL = `MAC_CYCLES_PER_VBLANK` (7,833,600 / 60 ≈
    update, PC-keyed boot workarounds. **`fast_slice` must stay ≤ 4000**: VIA T2
    periods are often 100–2000 cycles and longer slices miss underflows.
 2. On V8, the CPU gets `MAC_CYCLES_PER_VBLANK / MAC_V8_CYCLE_SCALE` cycles per
-   frame and each CPU cycle advances device time by the scale (default 2).
+   frame and each CPU cycle advances device time by the scale (default 2; the
+   Raspberry Pi port uses 1).
    Musashi's 68030 timings are about half the 68000's, so this keeps the LC II's
    instructions per tick close to the Classic's while timers stay real-time.
 3. VBL fires mid-frame (VIA CA1; V8 also the slot VBL in pseudo-VIA2).
@@ -83,12 +109,14 @@ One frame = one 60.15 Hz VBL = `MAC_CYCLES_PER_VBLANK` (7,833,600 / 60 ≈
 | `main/mac_disk_overlay.c/.h` | Copy-on-write disk overlay in PSRAM |
 | `main/mac_v8video.c/.h` | V8 VRAM, VDAC/CLUT, pseudo-VIA2, ROM video patch |
 | `main/mac_video.c/.h` | Renderer (Classic 1-bit and V8 CLUT paths), dirty strips |
-| `main/mac_touch.c/.h` | Touch gestures and sampler task |
+| `main/mac_touch.c/.h` | Touch gestures and sampler task; `touch_mouse_input()` for a relative mouse |
+| `main/mac_kbd.c/.h` | Keyboard (`MAC_KEYBOARD`): LC II ADB keyboard on the Egret HLE, Classic mirror of the ROM keyboard handler |
 | `main/mac_scsi.c/.h` | NCR 5380 with an empty bus |
 | `main/mac_scc.c/.h` | Z8530 stub |
 | `components/musashi/` | Musashi core, `m68kmmu.h` PMMU stub, `mac_native.c` native speed-ups, `hot_iram.lf` |
 | `components/display/display.cpp` | ST7796S (esp_lcd SPI) and FT5x06 (I2C) |
 | `host/` | x86 harness: shims, `host_main.c`, `host_prof.c` ([README](../MacintoshESPEmulator/host/README.md)) |
+| `ports/rpi/` | Raspberry Pi 2 port: Circle kernel, shims, SD worker, ILI9486/XPT2046 drivers ([README](../ports/rpi/README.md)) |
 
 ## Memory placement
 

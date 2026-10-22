@@ -2,7 +2,12 @@
 
 Written 2026-10-21. Goal: run the same emulator core (Mac Classic and LC II)
 on a **Raspberry Pi without an operating system**, booting straight from the
-SD card, with a 3.5-inch SPI touch shield. Status (2026-10-21): R0–R3 and R5 done — the Mac Classic boots to the Finder on the Pi 2 with touch, from SD, saving to SD; R6 (LC II) and R7 (core 1 renders) built, under test; R4 (USB input) next.
+SD card, with a 3.5-inch SPI touch shield. **Status (2026-10-22): R0–R6 done,
+R7 largely done, R8 (docs) done** — both machines boot from the SD card with
+touch, USB keyboard and mouse, persistent disks, a second drive, an 8 MB LC II at
+full CPU speed, turbo boot and all SD access on core 2. User docs:
+[`ports/rpi/README.md`](../ports/rpi/README.md); how it works:
+[`docs/learn/09-raspberry-pi-port.md`](../docs/learn/09-raspberry-pi-port.md).
 
 **User's hardware (2026-10-21):**
 - **Raspberry Pi 2 Model B v1.1 (2014)** — BCM2836, **4× ARM Cortex-A7 @ 900 MHz**
@@ -142,7 +147,7 @@ Higher SPI clocks are often possible on these shields — measure.
       Boots to the Finder; touch moves the cursor and clicks once the desktop is
       up (touch is ignored until WMgrPort is valid, as on the ESP32). Boot time
       not yet measured.
-- [ ] **R4. Input**: touch → `mac_touch.c` (trackpad + absolute modes);
+- [x] **R4. Input**: touch → `mac_touch.c` (trackpad + absolute modes);
       USB mouse; USB keyboard → ADB keyboard (shares plan step 6b). Built
       (2b80265): `MAC_KEYBOARD` core keyboard (LC II: ADB keyboard at address 2
       on the Egret HLE; Classic: mirror of the ROM keyboard handler), host
@@ -154,15 +159,17 @@ Higher SPI clocks are often possible on these shields — measure.
       `MAC_EXTERNAL_IMAGES`, `/mac/config.txt disk=`, write-back of changed
       blocks (1 s after the last write, at most every 10 s, before restart);
       confirmed on the Pi (a new folder survives power-off).
-- [ ] **R6. LC II + colour**: LC II build on the Pi (colour panel needs the
+- [x] **R6. LC II + colour**: LC II build on the Pi (colour panel needs the
       RGB565 palette path, already in `mac_video.c`), boot in 256 colours.
       Built: `kernel7-lc2.img` (`make MAC_ROM_LC_II=1`), chosen with `kernel=`
       in the SD card's `config.txt`; awaiting the first run.
-- [ ] **R7. Speed round**: measure boot-to-Finder and idle; tune (caches,
+- [~] **R7. Speed round** (done: core 1 render, turbo boot, SD worker on core 2,
+      LC II `MAC_V8_CYCLE_SCALE=1` + 8 MB, lean System; open: measured boot times,
+      SPI DMA, smaller dirty rectangles): measure boot-to-Finder and idle; tune (caches,
       `arm_freq`, SPI clock, DMA, switches). Started: core 1 renders and samples
       touch (`videocore.cpp`, Circle `ARM_ALLOW_MULTI_CORE`), so LCD transfers
       no longer stall the 68k.
-- [ ] **R8. Docs**: `docs/learn/08-raspberry-pi-port.md` + build/flash guide.
+- [x] **R8. Docs**: `docs/learn/09-raspberry-pi-port.md`, `ports/rpi/README.md`, `ports/rpi/macemu/README.md`.
 
 ## 5b. Status at the end of 2026-10-21
 
@@ -172,9 +179,11 @@ Done since R3: R5 (SD storage, write-back), R6 (LC II kernel, 8 MB RAM), R7 star
 (`disk_ov_fill`), second disk (`MAC_DRIVE2`, `disk2=`), `tools/split_disk.py`.
 Lessons: the user's "2 GB" card really stores ~128 MB; large direct `f_read()`s
 into heap buffers hang in Circle's SDHOST driver (all reads go through a 64 KB
-bounce buffer). **Open:** black screen after reformatting the card (FAT32) with
-`system753.dsk` + `games_2.dsk`; next: read `log.txt`, verify every card file,
-try `disk=custom_753.dsk` alone, check FAT32 vs the previous FAT16 layout.
+bounce buffer). The black screen after reformatting the card was the SDHOST
+driver again: Circle now builds with `NO_SDHOST` (EMMC driver) and the Pi boots.
+Since then (2026-10-22): SD worker on core 2, background prefetch, `log=`,
+lean System (25 CPU-hungry items disabled), pre-built desktop databases, LC II
+`MAC_V8_CYCLE_SCALE=1`.
 
 ## 6. Risks
 

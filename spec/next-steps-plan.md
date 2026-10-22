@@ -271,7 +271,12 @@ Steps:
       (`CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP` already set). Off by default.
 - Order: 6a → 6b → 6c and/or 6d → 6e. Pin budget decides 6c vs 6d for input.
 
-## Step 7 — Raspberry Pi bare-metal port (planned 2026-10-21; hardware: Pi 2 Model B v1.1 + AC-TFT35-V2.1)
+## Step 7 — Raspberry Pi bare-metal port (hardware: Pi 2 Model B v1.1 + AC-TFT35-V2.1) — working since 2026-10-21
+
+**Status 2026-10-22:** both machines run on the Pi (`ports/rpi/`), with SD-card
+disks that keep changes, USB keyboard/mouse (the ADB keyboard of Step 6b is done in
+the core, `MAC_KEYBOARD`), a second drive (`MAC_DRIVE2`), 8 MB LC II at full CPU
+speed. Details and remaining items: [`raspberry-pi-port.md`](raspberry-pi-port.md).
 
 Full plan: [`raspberry-pi-port.md`](raspberry-pi-port.md). Run the same core on a
 Raspberry Pi 2 Model B (quad Cortex-A7, 1 GB) with the user's AC-TFT35-V2.1 3.5" shield

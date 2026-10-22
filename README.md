@@ -5,6 +5,11 @@ The emulator boots a real Apple ROM, loads System 7.5.3 from a disk image
 embedded in flash, and runs the Finder on the board's 3.5" 480×320 LCD, with
 the capacitive touch panel acting as a trackpad.
 
+The same emulator core also runs **bare-metal on a Raspberry Pi 2** with a
+3.5" SPI touch display: ROM and disks on the SD card, saved changes kept,
+USB keyboard and mouse, an 8 MB LC II, a second disk drive. See
+[`ports/rpi/README.md`](ports/rpi/README.md).
+
 <!-- Screenshots / photos: the author will add them under docs/images/, e.g.
      ![Finder on the WT32-SC01](docs/images/finder.jpg)
      ![LC II in colour](docs/images/lc2-colour.jpg)
@@ -32,9 +37,16 @@ the capacitive touch panel acting as a trackpad.
 - **Real clock and PRAM**: Classic RTC chip and the LC II's Egret clock/PRAM.
 - **Speed work**: hot Musashi code in IRAM, native C trap dispatcher and
   resource decompressor, idle fast-forward with a 60 fps real-time throttle.
+- **Repaint after full-screen games**: old games that draw over the whole
+  screen without a window leave the desktop repainted when they quit.
 - **PC host harness**: the same emulator core builds for Linux/WSL, boots in
-  about a second, writes PNG screenshots, and has an instruction profiler.
+  about a second, writes PNG screenshots, and has an instruction profiler and
+  scripted touch and keyboard input.
   See [`MacintoshESPEmulator/host/README.md`](MacintoshESPEmulator/host/README.md).
+- **Raspberry Pi 2 port** (`ports/rpi/`, bare metal with Circle): everything
+  above plus persistent disks on the SD card, USB keyboard and mouse
+  (emulated ADB keyboard), 8 MB LC II at full CPU speed, two disk drives,
+  disk images of any size loaded on demand, and turbo boot.
 
 ## Supported ROMs
 
@@ -178,12 +190,17 @@ instructions executed to reach the Finder by 75% (Classic) and 81% (LC II).
 
 ## Limitations
 
-- **No keyboard** input yet.
+On the ESP32 board:
+
+- **No keyboard** input yet (the core supports one: the Raspberry Pi port uses it).
 - **No sound** output.
 - **Disk changes are lost at power-off** (the overlay lives in PSRAM). The
   disk image itself is read-only in flash.
 - **One disk**, embedded in the firmware at build time (no SD card, no SCSI disk).
 - **2 MB of Mac RAM.**
+
+The Raspberry Pi port lifts the keyboard, disk and RAM limits; see its
+[README](ports/rpi/README.md) for its own notes.
 - **LC II colour** on the real panel is unverified, and the Monitors control
   panel does not recognise the emulated video yet.
 - No serial ports, networking or AppleTalk (the SCC is a stub).
@@ -193,15 +210,15 @@ instructions executed to reach the Finder by 75% (Classic) and 81% (LC II).
 
 The ordered plan, with what is done and what is next (keyboard, board
 verification, persistent disk, more native acceleration), is in
-[`spec/next-steps-plan.md`](spec/next-steps-plan.md). History and
+[`spec/next-steps-plan.md`](spec/next-steps-plan.md); the Raspberry Pi port
+has its own plan and status in [`spec/raspberry-pi-port.md`](spec/raspberry-pi-port.md). History and
 measurements are in [`spec/performance-roadmap.md`](spec/performance-roadmap.md).
 Planned input hardware: an emulated ADB keyboard fed from an on-screen keyboard
 or an external SPI/I2C keyboard, and a joystick on the expansion header.
 
 ## Learn how it works
 
-New to the project? The [learning guide](docs/learn/README.md) explains, in
-six chapters, how the ESP32 board and the two emulated Macs are built, how
+New to the project? The [learning guide](docs/learn/README.md) explains how the ESP32 board and the two emulated Macs are built, how
 the 68k CPU is emulated, and how the emulator was made fast enough, with the
 measurements behind each step:
 [hardware](docs/learn/01-hardware-esp32.md) ·
@@ -209,7 +226,10 @@ measurements behind each step:
 [CPU emulation](docs/learn/03-cpu-emulation.md) ·
 [performance](docs/learn/04-performance.md) ·
 [input, display, storage](docs/learn/05-input-display-storage.md) ·
-[lessons learned](docs/learn/06-lessons-learned.md).
+[lessons learned](docs/learn/06-lessons-learned.md) ·
+[host harness](docs/learn/07-host-harness.md) ·
+[how it boots](docs/learn/08-boot-explained.md) ·
+[the Raspberry Pi port](docs/learn/09-raspberry-pi-port.md).
 
 ## Documentation
 
@@ -226,6 +246,8 @@ measurements behind each step:
 | [`docs/display-pipeline.md`](docs/display-pipeline.md) | Renderer, native 480×320 modes, touch |
 | [`docs/learn/07-host-harness.md`](docs/learn/07-host-harness.md) | PC host harness tutorial (how to use it) |
 | [`MacintoshESPEmulator/host/README.md`](MacintoshESPEmulator/host/README.md) | PC host harness reference and profiler |
+| [`ports/rpi/README.md`](ports/rpi/README.md) | Raspberry Pi 2 port: hardware, SD card, settings, building |
+| [`docs/learn/09-raspberry-pi-port.md`](docs/learn/09-raspberry-pi-port.md) | How the Pi port works (cores, SD worker, disks, keyboard) and what was learned |
 | [`CLAUDE.md`](CLAUDE.md) | Contributor guide: build switches, budgets, ground rules |
 
 ## Credits

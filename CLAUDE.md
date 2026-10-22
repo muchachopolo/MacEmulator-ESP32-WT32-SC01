@@ -41,7 +41,8 @@ ROM/                         ROMs + disk images (git-ignored, user-supplied)
 tools/                       build_disk.py, dis68k.py, romcheck.py, serial_watch.py, HFS parsers
 board_test/                  hardware diagnostic project
 docs/                        architecture, build, hardware, memory map, CPU, peripherals, display
-spec/                        next-steps-plan.md (plan), performance-roadmap.md (history)
+spec/                        next-steps-plan.md (plan), performance-roadmap.md (history), raspberry-pi-port.md
+ports/rpi/                   Raspberry Pi 2 bare-metal port (Circle): macemu/ kernel, common/ LCD+touch drivers, tests
 ```
 
 ## Machines and build variables

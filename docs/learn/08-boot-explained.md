@@ -5,8 +5,8 @@ Turning on the board starts **three different boots**, one inside the other:
 1. the **ESP32** boots its firmware (chip ROM → bootloader → our app);
 2. our app powers on an **emulated Macintosh**, which boots like a real one
    (68k reset → Mac ROM → System 7 → Finder);
-3. (planned) on a **Raspberry Pi 2**, the GPU boots first and then starts our
-   emulator as a bare-metal `kernel7.img`.
+3. on a **Raspberry Pi 2**, the GPU boots first and then starts our
+   emulator as a bare-metal `kernel7.img` (see [chapter 9](09-raspberry-pi-port.md)).
 
 ```mermaid
 flowchart LR
@@ -157,12 +157,13 @@ places to read the code:
 
 ---
 
-## Part 3 — Planned: the Raspberry Pi 2 bare-metal boot
+## Part 3 — The Raspberry Pi 2 bare-metal boot
 
 On a Raspberry Pi the **GPU** (VideoCore) starts first; the ARM CPU stays
 asleep until the GPU firmware has loaded our program. There is no operating
-system: `kernel7.img` *is* the emulator (on a Pi 1 the file is called `kernel.img`). See the full plan in
-[`spec/raspberry-pi-port.md`](../../spec/raspberry-pi-port.md).
+system: `kernel7.img` *is* the emulator (on a Pi 1 the file is called `kernel.img`).
+Set-up: [`ports/rpi/README.md`](../../ports/rpi/README.md); how it works:
+[chapter 9](09-raspberry-pi-port.md).
 
 ```mermaid
 sequenceDiagram
@@ -175,11 +176,12 @@ sequenceDiagram
     GPU->>SD: start.elf loads kernel7.img into RAM at 0x8000
     GPU->>ARM: release the ARM from reset at 0x8000
     ARM->>ARM: start-up code: stack, clear BSS,<br/>enable MMU + caches (essential for speed)
-    ARM->>ARM: framework init (e.g. Circle): timer, interrupts,<br/>SPI, SD card + FAT, USB
-    ARM->>SD: load /mac/Classic.ROM (or LC-II.ROM), open the disk image
-    ARM->>ARM: init the 3.5" LCD (ILI9486 over SPI) and touch (XPT2046)
-    ARM->>ARM: start cores 1-2 (display, touch/USB) via mailboxes
-    ARM->>ARM: mac_emu_init() → 68k reset → the Mac boots as in Part 2
+    ARM->>ARM: Circle init: timer, interrupts, SPI,<br/>SD card (EMMC) + FAT, USB (keyboard, mouse)
+    ARM->>ARM: init the 3.5" LCD (ILI9486 over SPI)
+    ARM->>SD: load /mac/config.txt and /mac/LC-II.ROM (or Classic.ROM),<br/>open the disk images (loaded on demand)
+    ARM->>ARM: mac_emu_init() → 68k reset
+    ARM->>ARM: start core 1 (display + touch) and core 2 (SD worker)
+    ARM->>ARM: core 0 runs the Mac: it boots as in Part 2
 ```
 
 The SD card for the Pi:
@@ -188,24 +190,24 @@ The SD card for the Pi:
 SD card (FAT32)
 ├── bootcode.bin, start.elf, fixup.dat   Raspberry Pi firmware
 ├── config.txt                           firmware settings (kernel name, clocks)
-├── kernel7.img                          our emulator, built with arm-none-eabi-gcc
+├── kernel7.img, kernel7-lc2.img      our emulator (Classic, LC II), built with arm-none-eabi-gcc
 └── mac/
     ├── Classic.ROM, LC-II.ROM           your ROMs
-    ├── custom_753.dsk, *.dsk            your disk images (writable here!)
-    └── config.txt                       which ROM + disk to boot
+    ├── *.dsk                            your disk images (changes are saved)
+    └── config.txt                       disk=, disk2=, log=
 ```
 
 ---
 
 ## The three boots side by side
 
-| | ESP32 board | Emulated Mac | Raspberry Pi 2 (planned) |
+| | ESP32 board | Emulated Mac | Raspberry Pi 2 |
 |---|---|---|---|
 | First code to run | chip ROM inside the ESP32 | the Mac ROM's reset vector (via the overlay) | GPU on-chip ROM |
 | Loads the next stage from | flash (bootloader at 0x1000) | ROM → boot blocks on the disk | SD card (bootcode.bin → start.elf) |
 | Our code starts at | `app_main()` | — (the Mac runs Apple's code) | `kernel7.img` at `0x8000` |
 | Where the "disk" lives | embedded in flash | the disk image, served by our hooks | a file on the SD card |
-| Operating system | FreeRTOS (2 cores) | System 7.5.3 (emulated) | none (bare metal, 4 cores) |
+| Operating system | FreeRTOS (2 cores) | System 7.5.3 (emulated) | none (bare metal with Circle, 4 cores) |
 | What you can learn here | XIP flash, caches, partitions | overlay, ROM init, boot blocks, INITs | GPU-first boot, bare-metal start-up, MMU/caches |
 
 Next: re-read [chapter 2](02-emulated-macs.md) for the machines' address maps

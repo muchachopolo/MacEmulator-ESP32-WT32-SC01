@@ -72,7 +72,12 @@ handshake and the packet protocol, not the MCU's code:
   (`EGRET_ONE_SEC_TICKS`): Egret while autopoll is on, Cuda when the mode is
   non-zero. They advance the Mac's Time global (it was frozen before).
 - **ADB:** autopoll and an emulated ADB mouse that reports the button only (zero
-  deltas); the position is written directly. An ADB keyboard (address 2) is planned.
+  deltas); the position is written directly. With `MAC_KEYBOARD` an **ADB
+  keyboard** sits at address 2 (handler 1): Talk R0 returns up to two key codes
+  (bit 7 = released), Talk R2/R3 and Listen R3 (address resolution) are
+  answered; autopoll sends keyboard packets before mouse packets. The Mac's own
+  keyboard driver does the rest (KMAP/KCHR, KeyMap, auto-repeat). The Classic
+  instead gets a C mirror of its ROM keyboard handler ($403AC0) in `mac_kbd.c`.
 - IIC and 6805 memory read/write commands answered as the ROM expects.
 
 ## Floppy and disk path
@@ -119,6 +124,14 @@ $FE000A  RTS                     ; → IODone with D0 = result
 `v8disk_prime()` copies sectors between the image/overlay and Mac RAM. Nothing
 runs per instruction.
 
+**Drive 2** (`MAC_DRIVE2`, used by the Raspberry Pi port): the LC II has one
+floppy drive, so a second volume is added from software. At the Finder's next
+WaitNextEvent/GetNextEvent the A-line pre-hook enters a routine served from
+$FE0040: `_NewPtrSysClear` (drive queue element: non-ejectable, size in
+dQDrvSz/dQDrvSz2), `_AddDrive` as drive 2 / refNum −5, `_PostEvent(diskEvt, 2)`,
+`RTS` back to the event trap. The system mounts the volume; Prime requests for
+drive 2 go to the platform's I/O callback (`v8disk_set_drive2()`).
+
 ### Disk overlay
 
 `mac_disk_overlay.c`: "level 1" writable disk: a block copy-on-write overlay in PSRAM
@@ -127,8 +140,11 @@ pool of `DISK_OVERLAY_KB` (384 KB Classic, 256 KB LC II, whose VRAM uses
 512 KB of PSRAM) plus a 2-byte-per-block index. Reads take the slot if there
 is one, else the flash image. Writes identical to flash take no slot. A write
 that would not fit fails as a whole with dskFulErr (−34) so the volume never
-holds half a request. The volume mounts unlocked. **Everything is lost at
-power-off or restart.** `DISK_WRITABLE=0` restores the read-only volume
+holds half a request. The volume mounts unlocked. **On the ESP32 everything
+is lost at power-off or restart.** A platform can keep the changes:
+`disk_ov_write_count()` / `disk_ov_next_written()` find the written blocks, and
+`disk_ov_fill` (NULL by default) lets it load image bytes on demand before the
+overlay reads them (the Raspberry Pi port saves to the SD card this way). `DISK_WRITABLE=0` restores the read-only volume
 (writes fail with wPrErr, volume locked). Level 2 (flash partition + flush +
 PRAM in NVS) is planned.
 

@@ -99,8 +99,46 @@ MAC_ROM_LC_II=0 DISK_NAME=custom_753.dsk && ./build/macemu --frames 20000
   `full_screen_apps[]` in `MacintoshESPEmulator/main/mac_memory.c` (prefix of
   the application name); they then get the full 512×342 view
   ([display-pipeline.md](display-pipeline.md)).
-- Apps that need a **keyboard** can't be played yet (keyboard input is planned).
+- Apps that need a **keyboard** can't be played on the ESP32 board yet; the
+  Raspberry Pi port has a USB keyboard.
 - Colour apps run on the LC II build (`ROM_NAME "LC-II.ROM"`); the Mac Classic
   build is black-and-white.
 - If an app quits or misbehaves, check it on the host harness first — it is
   deterministic and gives screenshots and traces.
+
+## 6. Bigger disks for the Raspberry Pi port: `tools/split_disk.py`
+
+The Raspberry Pi port reads disk images of any size from its SD card and has a
+second drive on the LC II. `tools/split_disk.py` turns one big HFS image (for
+example a full System 7.5.3 installation with many applications) into:
+
+- a **bootable System disk** with the System Folder and whatever else you keep,
+  leaving out the big folders (`--drop`); and
+- **data disks** packed from one folder, biggest items first, as many images of
+  `--size` as needed (`pack`).
+
+```bash
+# bootable System disk, 48 MB, without the two biggest folders, and with
+# CPU-hungry extensions/control panels moved to the "(Disabled)" folders
+python3 tools/split_disk.py system BIG.dsk ROM/split/system.dsk --name "System 7.5.3" \
+    --drop "Desktop Folder:Applications" --drop "Desktop Folder:Games" \
+    --disable "Extensions:SomeDeskToy" --disable "Control Panels:SomeScreenSaver" \
+    --size 48M
+
+# data disks of 50 MB from one folder: ROM/split/data_1.dsk, data_2.dsk, ...
+python3 tools/split_disk.py pack BIG.dsk ROM/split/data.dsk --name "Data" \
+    --from "Desktop Folder:Applications" --size 50M
+```
+
+`--disable` does what Extensions Manager does (the items can be switched back on
+there). Old System Folders often carry desk toys, screen savers, network and
+file-sharing services and Apple-menu patches that keep the emulated CPU busy
+all the time; the host profiler (`SystemTask` cost, idle fast-forward share)
+shows which. A full System 7.5.3 needs the LC II with 8 MB (the Pi's LC II
+build).
+
+To skip "Rebuilding the desktop file" on the first boot, pre-build the desktop
+databases with the host harness (LC II, `EXTRA_DEFS="-DMAC_DRIVE2=1"`): boot
+with `--disk-rw OUT1 --disk2 DATA --disk2-out OUT2` and the Special → Shut Down
+gestures used by `build_disk.py --prep`, so both volumes are unmounted cleanly.
+

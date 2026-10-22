@@ -65,6 +65,11 @@ pointers) and `m68ki_cycles[][0x10000]` (cycle counts per CPU type).
   per-access translation**: the LC II ROM's MMU tables map the same addresses
   as plain 24-bit masking (verified), so translation would only cost time.
 - Cache instructions (e.g. `$F4AC` at the LC II reset entry) are accepted.
+- **FPU divide fix** (`softfloat.c`, `floatx80_div`): 68881 "unnormal" operands
+  (exponent set, integer bit clear) are normalised first, as the FPU does. The
+  division assumes normalised significands; with an unnormal divisor its
+  correction loops ran ~2^60 times, seconds per FDIV (seen in a 1987 game).
+  Normal operands give bit-identical results.
 
 ## Memory callbacks
 
@@ -105,6 +110,13 @@ profiler, and verify every replacement against the interpreter on the host
 
 The A-line hook also feeds the idle fast-forward (`M68K_ALINE_HOOK` →
 `mac_aline_hook`). Nothing is added to the per-instruction path.
+
+The A-line **pre-hook** (`mac_native_aline_pre`) also lets the emulator run a
+Toolbox call inside the Mac at a safe point (an event trap of the Finder, SR
+mask 0): it pushes the routine's parameters and a return address pointing back
+at the trap, then jumps through the trap table. `MAC_QUIT_REPAINT` uses it to
+call `PaintBehind(WindowList, GrayRgn)` and `DrawMenuBar` after a full-screen
+game quits; `MAC_DRIVE2` uses it to mount the second disk.
 
 Host result: −81% (LC II) and −75% (Classic) instructions to reach the Finder.
 Board (Classic, custom disk): Finder at ~63 s instead of ~105 s.
