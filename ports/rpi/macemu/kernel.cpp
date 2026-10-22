@@ -47,7 +47,8 @@ CKernel::CKernel (void)
 	m_pDisk (0),
 	m_nDiskSize (0),
 	m_nFlushedWrites (0),
-	m_nLastWriteSeen (0)
+	m_nLastWriteSeen (0),
+	m_bMounted (FALSE)
 {
 	s_pThis = this;
 	m_DiskName[0] = 0;
@@ -61,7 +62,9 @@ boolean CKernel::Initialize (void)
 	if (bOK)
 	{
 		CDevice *pTarget = m_DeviceNameService.GetDevice (m_Options.GetLogDevice (), FALSE);
-		bOK = m_Logger.Initialize (pTarget ? pTarget : &m_Screen);
+		m_LogFile.SetTarget (pTarget ? pTarget : &m_Screen);
+		bOK = m_Logger.Initialize (&m_LogFile);
+		m_Logger.RegisterPanicHandler (PanicHandler);
 	}
 	if (bOK) bOK = m_Interrupt.Initialize ();
 	if (bOK) bOK = m_Timer.Initialize ();
@@ -69,6 +72,16 @@ boolean CKernel::Initialize (void)
 	if (bOK) bOK = m_EMMC.Initialize ();
 	if (bOK) bOK = m_USBHCI.Initialize ();
 	return bOK;
+}
+
+// A panic (exception, assertion): save the log, show a red 9.
+void CKernel::PanicHandler (void)
+{
+	if (s_pThis->m_bMounted)
+	{
+		s_pThis->m_LogFile.Save (TRUE);
+	}
+	s_pThis->ShowError (9);
 }
 
 void CKernel::ShowError (unsigned nCode)
@@ -140,6 +153,7 @@ boolean CKernel::LoadImages (void)
 		ShowError (ErrorSDCard);
 		return FALSE;
 	}
+	m_bMounted = TRUE;
 
 	unsigned nROMSize;
 	u8 *pROM = LoadFile (MAC_DIR ROM_NAME, &nROMSize);
@@ -253,14 +267,18 @@ TShutdownMode CKernel::Run (void)
 	display_init ();
 	if (!LoadImages ())
 	{
+		if (m_bMounted) m_LogFile.Save (TRUE);
 		return ShutdownHalt;
 	}
+	m_LogFile.Save (TRUE);
 	if (!mac_emu_init ())
 	{
-		m_Logger.Write (From, LogPanic, "emulator init failed");
+		m_Logger.Write (From, LogError, "emulator init failed");
+		m_LogFile.Save (TRUE);
 		ShowError (ErrorInit);
 		return ShutdownHalt;
 	}
+	m_LogFile.Save (TRUE);
 	if (!m_VideoCore.Initialize ())				// starts core 1
 	{
 		m_Logger.Write (From, LogPanic, "cannot start core 1");

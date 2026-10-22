@@ -19,6 +19,7 @@
 #include "xpt2046.h"
 #include "videocore.h"
 #include "usbinput.h"
+#include "logfile.h"
 
 enum TShutdownMode
 {
@@ -41,6 +42,7 @@ public:
 	CXPT2046 *GetTouch (void) { return &m_Touch; }
 	CCPUThrottle *GetCPUThrottle (void) { return &m_CPUThrottle; }
 	CUSBInput *GetUSBInput (void) { return &m_USBInput; }
+	CLogFile *GetLogFile (void) { return &m_LogFile; }
 
 	// Write the blocks the Mac changed back to the disk image file.
 	// bForce: also when the last write is recent (restart, shutdown).
@@ -51,6 +53,7 @@ private:
 	u8 *LoadFile (const char *pName, unsigned *pSize);
 	void ReadConfig (void);
 	void ShowError (unsigned nCode);
+	static void PanicHandler (void);
 
 	// do not change this order
 	CActLED			m_ActLED;
@@ -58,6 +61,7 @@ private:
 	CDeviceNameService	m_DeviceNameService;
 	CScreenDevice		m_Screen;		// HDMI log (optional)
 	CSerialDevice		m_Serial;		// UART log on GPIO14/15 (optional)
+	CLogFile		m_LogFile;		// log tee -> SD:/mac/log.txt
 	CExceptionHandler	m_ExceptionHandler;
 	CInterruptSystem	m_Interrupt;
 	CTimer			m_Timer;
@@ -77,6 +81,7 @@ private:
 	unsigned	m_nDiskSize;
 	unsigned	m_nFlushedWrites;		// disk_ov_write_count() at the last flush
 	u64		m_nLastWriteSeen;		// when that count last changed
+	boolean		m_bMounted;
 
 	static CKernel *s_pThis;
 };

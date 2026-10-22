@@ -3,6 +3,14 @@
 #include "mac_memory.h"
 #include "mac_video.h"
 #include <circle/timer.h>
+#include <circle/string.h>
+#include "m68k.h"
+
+extern volatile unsigned pi_frame_count;		// platform.cpp
+
+// Freeze check: if the 68k has not finished a frame for this long, show the
+// frame count and its PC on the bottom of the LCD (for photos/bug reports).
+static const u64 FreezeUs = 5000000;
 
 // Touch sampling period: the ESP32's sampler runs at ~60 Hz.
 static const u64 TouchPeriodUs = 16000;
@@ -21,8 +29,25 @@ void CVideoCore::Run (unsigned nCore)
 	{
 		return;						// cores 2 and 3 are idle
 	}
+	unsigned nLastFrame = pi_frame_count;
+	u64 nLastProgress = CTimer::GetClockTicks64 (), nLastShown = 0;
 	for (;;)
 	{
+		u64 nNow = CTimer::GetClockTicks64 ();
+		if (pi_frame_count != nLastFrame)
+		{
+			nLastFrame = pi_frame_count;
+			nLastProgress = nNow;
+		}
+		else if (nNow - nLastProgress >= FreezeUs && nNow - nLastShown >= 2000000)
+		{
+			nLastShown = nNow;
+			CString Text;
+			Text.Format ("%u-%06X", nLastFrame, m68k_get_reg (0, M68K_REG_PC) & 0xFFFFFF);
+			CILI9486 *pLCD = CKernel::Get ()->GetLCD ();
+			pLCD->Fill (0, CILI9486::Height - 28, CILI9486::Width, 28, 0xF800);
+			pLCD->DrawDigits (6, CILI9486::Height - 24, 4, Text, 0xFFFF);
+		}
 		PollTouch ();
 		unsigned nBefore = s_nDraws;
 		uint8_t *pRAM = mac_mem_get_ram ();

@@ -45,10 +45,18 @@ void pi_restart (void)
 	reboot ();
 }
 
+volatile unsigned pi_frame_count;			// read by core 1's freeze check
+
 void pi_frame_hook (void)
 {
-	static u64 LastThrottle;
+	static u64 LastThrottle, LastLogSave;
 	u64 Now = CTimer::GetClockTicks64 ();
+	pi_frame_count++;
+	if (Now - LastLogSave >= 3000000)
+	{
+		LastLogSave = Now;
+		CKernel::Get ()->GetLogFile ()->Save ();
+	}
 	CKernel::Get ()->FlushDisk (FALSE);		// cheap unless the Mac wrote
 	CKernel::Get ()->GetUSBInput ()->Poll ();	// USB keyboard + mouse
 	if (Now - LastThrottle >= ThrottleIntervalUs)

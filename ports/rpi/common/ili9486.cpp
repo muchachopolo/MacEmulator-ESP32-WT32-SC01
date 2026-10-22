@@ -162,12 +162,13 @@ void CILI9486::Blit (unsigned x, unsigned y, unsigned w, unsigned h, const u16 *
 	SendWords (pPixels, w * h);
 }
 
-// 3x5 font for "0123456789.-" (bit 2 = left column)
-static const u8 Glyphs[12][5] =
+// 3x5 font for "0123456789.-ABCDEF" (bit 2 = left column)
+static const u8 Glyphs[18][5] =
 {
 	{7,5,5,5,7}, {2,6,2,2,7}, {7,1,7,4,7}, {7,1,7,1,7}, {5,5,7,1,1},
 	{7,4,7,1,7}, {7,4,7,5,7}, {7,1,1,1,1}, {7,5,7,5,7}, {7,5,7,1,7},
 	{0,0,0,0,2}, {0,0,7,0,0},
+	{2,5,7,5,5}, {6,5,6,5,6}, {7,4,4,4,7}, {6,5,5,5,6}, {7,4,6,4,7}, {7,4,6,4,4},
 };
 
 void CILI9486::DrawDigits (unsigned x, unsigned y, unsigned nScale, const char *pText,
@@ -175,12 +176,13 @@ void CILI9486::DrawDigits (unsigned x, unsigned y, unsigned nScale, const char *
 {
 	for (; *pText; pText++, x += 4 * nScale)
 	{
-		int c = *pText == '.' ? 10 : *pText == '-' ? 11 : *pText - '0';
+		int c = *pText == '.' ? 10 : *pText == '-' ? 11
+			: *pText >= 'A' && *pText <= 'F' ? 12 + *pText - 'A' : *pText - '0';
 		if (nBackground != NoBackground)
 		{
 			Fill (x, y, 4 * nScale, 5 * nScale, (u16) nBackground);
 		}
-		if (c < 0 || c > 11)
+		if (c < 0 || c > 17)
 		{
 			continue;				// unknown: blank cell
 		}

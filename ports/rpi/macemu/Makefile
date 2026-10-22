@@ -33,7 +33,7 @@ CORE_SRCS    := mac_emulator.c mac_memory.c mac_video.c mac_via.c mac_scc.c mac_
                 mac_iwm.c mac_egret.c mac_v8video.c mac_v8disk.c mac_touch.c mac_rtc.c \
                 mac_disk_overlay.c mac_kbd.c
 MUSASHI_SRCS := m68kcpu.c m68kops.c softfloat/softfloat.c mac_native.c
-PI_SRCS      := main.cpp kernel.cpp platform.cpp videocore.cpp usbinput.cpp
+PI_SRCS      := main.cpp kernel.cpp platform.cpp videocore.cpp usbinput.cpp logfile.cpp
 COMMON_SRCS  := ili9486.cpp xpt2046.cpp
 
 OBJS	= $(addprefix $(O)/,$(PI_SRCS:.cpp=.o)) $(O)/syscalls.o \

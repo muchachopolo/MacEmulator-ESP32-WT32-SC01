@@ -31,7 +31,7 @@ public:
 	// Write a w*h block of RGB565 pixels (row-major).
 	void Blit (unsigned x, unsigned y, unsigned w, unsigned h, const u16 *pPixels);
 
-	// Digits, '.' and '-' in a 3x5 font scaled by nScale (cell 4*nScale wide).
+	// Digits, 'A'-'F', '.' and '-' in a 3x5 font scaled by nScale (cell 4*nScale wide).
 	static const unsigned NoBackground = 0x10000;
 	void DrawDigits (unsigned x, unsigned y, unsigned nScale, const char *pText,
 			 u16 nColor, unsigned nBackground = NoBackground);
