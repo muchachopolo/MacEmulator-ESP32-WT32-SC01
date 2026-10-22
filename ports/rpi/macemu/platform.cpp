@@ -1,7 +1,9 @@
 // Platform layer for the emulator core on the Pi: the ESP-IDF shim services
 // (shim/pi_platform.h) and the components/display API (display.h), backed by
-// Circle, the ILI9486 and the XPT2046.
+// Circle, the ILI9486 and the XPT2046. Rendering and touch run on core 1
+// (videocore.cpp); everything else here runs on core 0.
 #include "kernel.h"
+#include "videocore.h"
 #include "pi_platform.h"
 #include "display.h"
 #include "mac_memory.h"
@@ -12,9 +14,6 @@
 #include <stdarg.h>
 #include <stdio.h>
 
-// Single core: the LCD is refreshed from the frame hook at most this often.
-// A changed 20-line strip costs ~8.6 ms at 17.9 MHz and blocks the 68k.
-static const u64 RenderIntervalUs = 33000;
 static const u64 ThrottleIntervalUs = 3000000;	// CCPUThrottle temperature check
 
 uint64_t pi_micros (void)
@@ -48,17 +47,8 @@ void pi_restart (void)
 
 void pi_frame_hook (void)
 {
-	static u64 LastRender, LastThrottle;
+	static u64 LastThrottle;
 	u64 Now = CTimer::GetClockTicks64 ();
-	if (Now - LastRender >= RenderIntervalUs)
-	{
-		LastRender = Now;
-		uint8_t *pRAM = mac_mem_get_ram ();
-		if (pRAM)
-		{
-			mac_video_render (pRAM, mac_mem_get_ram_size ());
-		}
-	}
 	CKernel::Get ()->FlushDisk (FALSE);		// cheap unless the Mac wrote
 	if (Now - LastThrottle >= ThrottleIntervalUs)
 	{
@@ -80,26 +70,14 @@ bool display_init (void)
 
 void display_draw (int x, int y, int w, int h, const uint16_t *data)
 {
-	CKernel::Get ()->GetLCD ()->Blit (x, y, w, h, data);
+	CKernel::Get ()->GetLCD ()->Blit (x, y, w, h, data);	// core 1
+	CVideoCore::s_nDraws++;
+	CVideoCore::PollTouch ();				// keep ~60 Hz during big redraws
 }
 
-// The emulator expects the WT32-SC01's FT5x06 orientation: tx grows with
-// screen y, ty shrinks as screen x grows (mac_touch.c: dx = -dty, dy = dtx).
-bool display_get_touch (int *x, int *y)
+bool display_get_touch (int *x, int *y)			// core 0
 {
-	unsigned rx, ry, rz;
-	if (!CKernel::Get ()->GetTouch ()->Read (&rx, &ry, &rz))
-	{
-		return false;
-	}
-	int u = XPT2046_CAL_SWAP ? ry : rx, v = XPT2046_CAL_SWAP ? rx : ry;
-	int sx = 40 + (u - XPT2046_CAL_LEFT) * (int) (CILI9486::Width - 80)
-			/ (XPT2046_CAL_RIGHT - XPT2046_CAL_LEFT);
-	int sy = 40 + (v - XPT2046_CAL_TOP) * (int) (CILI9486::Height - 80)
-			/ (XPT2046_CAL_BOTTOM - XPT2046_CAL_TOP);
-	*x = sy;
-	*y = (int) CILI9486::Width - 1 - sx;
-	return true;
+	return CVideoCore::GetTouch (x, y);
 }
 
 void display_set_brightness (int percent)

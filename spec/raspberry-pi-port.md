@@ -2,7 +2,7 @@
 
 Written 2026-10-21. Goal: run the same emulator core (Mac Classic and LC II)
 on a **Raspberry Pi without an operating system**, booting straight from the
-SD card, with a 3.5-inch SPI touch shield. Status: R0–R3 done (2026-10-21): the Mac Classic boots to the Finder on the Pi 2 with touch; next R4/R5.
+SD card, with a 3.5-inch SPI touch shield. Status (2026-10-21): R0–R3 and R5 done — the Mac Classic boots to the Finder on the Pi 2 with touch, from SD, saving to SD; R6 (LC II) and R7 (core 1 renders) built, under test; R4 (USB input) next.
 
 **User's hardware (2026-10-21):**
 - **Raspberry Pi 2 Model B v1.1 (2014)** — BCM2836, **4× ARM Cortex-A7 @ 900 MHz**
@@ -136,7 +136,7 @@ Higher SPI clocks are often possible on these shields — measure.
 - [x] **R3. Emulator core boots**: `ports/rpi1/` Makefile building `main/*.c`
       + Musashi with the shims; ROM and disk loaded from SD; render to the LCD;
       Classic boots to the Finder (compare screenshots/behaviour with the host
-      harness). **Done (2026-10-21, `ports/rpi/r3-emu/`):** single core, core
+      harness). **Done (2026-10-21, `ports/rpi/macemu/`, then named r3-emu):** single core, core
       compiled with `HOST_BUILD=1` + `MAC_FRAME_THROTTLE=1`, newlib libc + stubs,
       ROM and disk embedded in `kernel7.img` (Circle `KERNEL_MAX_SIZE=16 MB`).
       Boots to the Finder; touch moves the cursor and clicks once the desktop is
@@ -144,12 +144,19 @@ Higher SPI clocks are often possible on these shields — measure.
       not yet measured.
 - [ ] **R4. Input**: touch → `mac_touch.c` (trackpad + absolute modes);
       USB mouse; USB keyboard → ADB keyboard (shares plan step 6b).
-- [ ] **R5. Storage**: writable disk images on SD (write-back, flush at Shut
-      Down), disk/ROM selection via `/mac/config.txt`.
+- [x] **R5. Storage**: writable disk images on SD (write-back, flush at Shut
+      Down), disk/ROM selection via `/mac/config.txt`. **Done:**
+      `MAC_EXTERNAL_IMAGES`, `/mac/config.txt disk=`, write-back of changed
+      blocks (1 s after the last write, at most every 10 s, before restart);
+      confirmed on the Pi (a new folder survives power-off).
 - [ ] **R6. LC II + colour**: LC II build on the Pi (colour panel needs the
       RGB565 palette path, already in `mac_video.c`), boot in 256 colours.
+      Built: `kernel7-lc2.img` (`make MAC_ROM_LC_II=1`), chosen with `kernel=`
+      in the SD card's `config.txt`; awaiting the first run.
 - [ ] **R7. Speed round**: measure boot-to-Finder and idle; tune (caches,
-      `arm_freq`, SPI clock, DMA, switches).
+      `arm_freq`, SPI clock, DMA, switches). Started: core 1 renders and samples
+      touch (`videocore.cpp`, Circle `ARM_ALLOW_MULTI_CORE`), so LCD transfers
+      no longer stall the 68k.
 - [ ] **R8. Docs**: `docs/learn/08-raspberry-pi-port.md` + build/flash guide.
 
 ## 6. Risks

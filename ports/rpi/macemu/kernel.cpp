@@ -1,6 +1,7 @@
 // The emulator core (MacintoshESPEmulator/main + Musashi) on a bare-metal
-// Raspberry Pi 2, single core: the 68k runs in mac_emu_run() and the per-frame
-// hook (platform.cpp) refreshes the LCD, samples touch and saves the disk.
+// Raspberry Pi 2: core 0 runs the 68k in mac_emu_run() (its per-frame hook in
+// platform.cpp saves the disk), core 1 refreshes the LCD and samples touch
+// (videocore.cpp).
 // R5: the ROM and the disk image are files on the SD card (/mac/), and blocks
 // the Mac writes are written back to the disk image file.
 #include "kernel.h"
@@ -40,6 +41,7 @@ CKernel::CKernel (void)
 	m_LCD (&m_SPI),
 	m_Touch (&m_SPI),
 	m_EMMC (&m_Interrupt, &m_Timer, &m_ActLED),
+	m_VideoCore (CMemorySystem::Get ()),
 	m_pDisk (0),
 	m_nDiskSize (0),
 	m_nFlushedWrites (0),
@@ -254,6 +256,11 @@ TShutdownMode CKernel::Run (void)
 	{
 		m_Logger.Write (From, LogPanic, "emulator init failed");
 		ShowError (ErrorInit);
+		return ShutdownHalt;
+	}
+	if (!m_VideoCore.Initialize ())				// starts core 1
+	{
+		m_Logger.Write (From, LogPanic, "cannot start core 1");
 		return ShutdownHalt;
 	}
 	mac_emu_run (0);					// never returns

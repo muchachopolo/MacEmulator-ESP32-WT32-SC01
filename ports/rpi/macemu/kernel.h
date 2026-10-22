@@ -17,6 +17,7 @@
 #include <fatfs/ff.h>
 #include "ili9486.h"
 #include "xpt2046.h"
+#include "videocore.h"
 
 enum TShutdownMode
 {
@@ -65,6 +66,7 @@ private:
 	CXPT2046		m_Touch;
 	CEMMCDevice		m_EMMC;
 	FATFS			m_FileSystem;
+	CVideoCore		m_VideoCore;
 
 	char		m_DiskName[64];			// /mac/config.txt "disk="
 	u8		*m_pDisk;			// pristine copy = what the file holds
