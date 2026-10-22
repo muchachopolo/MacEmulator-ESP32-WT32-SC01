@@ -83,6 +83,8 @@ CKernel::CKernel (void)
 	m_bOnDemand (FALSE),
 	m_pChunkLoaded (0),
 	m_nChunks (0),
+	m_nPrefetchChunk (0),
+	m_nPrefetchPiece (0),
 	m_nDisk2LastWrite (0)
 {
 	s_pThis = this;
@@ -299,6 +301,43 @@ void CKernel::DiskFill (uint32_t nOffset, uint32_t nCount)
 					       nCRC ^ 0xFFFFFFFF);
 		}
 	}
+}
+
+void CKernel::Prefetch (void)
+{
+	if (m_bOnDemand)				// drive 1 first, then drive 2
+	{
+		const unsigned nPiece = 0x10000, nPieces = (1u << ChunkShift) / nPiece;
+		while (m_nPrefetchChunk < m_nChunks && m_pChunkLoaded[m_nPrefetchChunk])
+		{
+			m_nPrefetchChunk++;
+			m_nPrefetchPiece = 0;
+		}
+		if (m_nPrefetchChunk < m_nChunks)
+		{
+			unsigned nPos = (m_nPrefetchChunk << ChunkShift) + m_nPrefetchPiece * nPiece;
+			unsigned n = nPos < m_nDiskSize
+				     ? (m_nDiskSize - nPos < nPiece ? m_nDiskSize - nPos : nPiece) : 0;
+			if (n && (   f_lseek (&m_DiskFile, nPos) != FR_OK
+				  || ReadPieces (&m_DiskFile, m_pDisk + nPos, n) != FR_OK))
+			{
+				m_Logger.Write (From, LogError, "prefetch failed at %u", nPos);
+				m_nPrefetchChunk = m_nChunks;
+				return;
+			}
+			if (++m_nPrefetchPiece >= nPieces || nPos + n >= m_nDiskSize)
+			{
+				m_pChunkLoaded[m_nPrefetchChunk++] = 1;
+				m_nPrefetchPiece = 0;
+				if (m_nPrefetchChunk == m_nChunks)
+				{
+					m_Logger.Write (From, LogNotice, "%s: all in RAM", m_DiskName);
+				}
+			}
+			return;
+		}
+	}
+	m_Disk2.PrefetchStep ();
 }
 
 boolean CKernel::LoadImages (void)

@@ -49,6 +49,10 @@ public:
 	// bForce: also when the last write is recent (restart, shutdown).
 	void FlushDisk (boolean bForce);
 
+	// Frame hook: load a little more of the on-demand disks in the
+	// background, so the Mac doesn't pause on first access later.
+	void Prefetch (void);
+
 private:
 	boolean LoadImages (void);
 	u8 *LoadFile (const char *pName, unsigned *pSize);
@@ -92,6 +96,7 @@ private:
 	FIL		m_DiskFile;
 	u8		*m_pChunkLoaded;		// one byte per chunk
 	unsigned	m_nChunks;
+	unsigned	m_nPrefetchChunk, m_nPrefetchPiece;
 
 	char		m_Disk2Name[64];		// /mac/config.txt "disk2=" (LC II)
 	CDiskImage	m_Disk2;

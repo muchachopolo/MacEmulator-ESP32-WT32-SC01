@@ -1,6 +1,6 @@
 // Log tee: everything Circle's logger prints (emulator ESP_LOG* lines, USB,
 // exception dumps) goes to the HDMI screen as before and into a RAM buffer
-// that is saved to SD:/mac/log.txt every few seconds and on a panic, so a
+// that is saved to SD:/mac/log.txt every 30 seconds and on a panic, so a
 // failure can be diagnosed without an HDMI monitor.
 #ifndef _logfile_h
 #define _logfile_h

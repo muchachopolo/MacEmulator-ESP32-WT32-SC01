@@ -52,12 +52,16 @@ void pi_frame_hook (void)
 	static u64 LastThrottle, LastLogSave;
 	u64 Now = CTimer::GetClockTicks64 ();
 	pi_frame_count++;
-	if (Now - LastLogSave >= 3000000)
+	if (Now - LastLogSave >= 30000000)		// SD writes pause the Mac: rarely
 	{
 		LastLogSave = Now;
 		CKernel::Get ()->GetLogFile ()->Save ();
 	}
 	CKernel::Get ()->FlushDisk (FALSE);		// cheap unless the Mac wrote
+	if (pi_frame_count % 3 == 0)
+	{
+		CKernel::Get ()->Prefetch ();		// ~64 KB, a few ms
+	}
 	CKernel::Get ()->GetUSBInput ()->Poll ();	// USB keyboard + mouse
 	if (Now - LastThrottle >= ThrottleIntervalUs)
 	{

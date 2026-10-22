@@ -22,6 +22,10 @@ public:
 	boolean IsDirty (void) const { return m_nDirty != 0; }
 	unsigned Flush (void);				// returns blocks written
 
+	// Background loading: read one 64 KB piece of the next chunk not yet
+	// in RAM. FALSE when everything is loaded.
+	boolean PrefetchStep (void);
+
 private:
 	boolean Load (unsigned nOffset, unsigned nCount);
 
@@ -32,6 +36,7 @@ private:
 	unsigned m_nChunks;
 	u8 *m_pDirty;					// one bit per 512-byte block
 	unsigned m_nDirty;
+	unsigned m_nPrefetchChunk, m_nPrefetchPiece;
 };
 
 #endif

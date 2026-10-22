@@ -15,7 +15,9 @@ CDiskImage::CDiskImage (void)
 	m_pChunkLoaded (0),
 	m_nChunks (0),
 	m_pDirty (0),
-	m_nDirty (0)
+	m_nDirty (0),
+	m_nPrefetchChunk (0),
+	m_nPrefetchPiece (0)
 {
 }
 
@@ -127,4 +129,32 @@ unsigned CDiskImage::Flush (void)
 	}
 	f_sync (&m_File);
 	return nWritten;
+}
+
+boolean CDiskImage::PrefetchStep (void)
+{
+	const unsigned nPiece = 0x10000, nPieces = (1u << ChunkShift) / nPiece;
+	while (m_nPrefetchChunk < m_nChunks && m_pChunkLoaded[m_nPrefetchChunk])
+	{
+		m_nPrefetchChunk++;				// loaded meanwhile (on demand)
+		m_nPrefetchPiece = 0;
+	}
+	if (!m_pData || m_nPrefetchChunk >= m_nChunks)
+	{
+		return FALSE;
+	}
+	unsigned nPos = (m_nPrefetchChunk << ChunkShift) + m_nPrefetchPiece * nPiece;
+	unsigned n = nPos < m_nSize ? (m_nSize - nPos < nPiece ? m_nSize - nPos : nPiece) : 0;
+	if (n && (f_lseek (&m_File, nPos) != FR_OK || ReadPieces (&m_File, m_pData + nPos, n) != FR_OK))
+	{
+		CLogger::Get ()->Write (From, LogError, "prefetch failed at %u", nPos);
+		m_nPrefetchChunk = m_nChunks;			// give up; on-demand still works
+		return FALSE;
+	}
+	if (++m_nPrefetchPiece >= nPieces || nPos + n >= m_nSize)
+	{
+		m_pChunkLoaded[m_nPrefetchChunk++] = 1;
+		m_nPrefetchPiece = 0;
+	}
+	return TRUE;
 }
