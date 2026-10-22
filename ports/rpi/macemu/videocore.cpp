@@ -25,9 +25,13 @@ CVideoCore::CVideoCore (CMemorySystem *pMemorySystem)
 
 void CVideoCore::Run (unsigned nCore)
 {
+	if (nCore == 2)
+	{
+		CKernel::Get ()->GetSDWorker ()->Run ();	// SD card access, never returns
+	}
 	if (nCore != 1)
 	{
-		return;						// cores 2 and 3 are idle
+		return;						// core 3 is idle
 	}
 	unsigned nLastFrame = pi_frame_count;
 	u64 nLastProgress = CTimer::GetClockTicks64 (), nLastShown = 0;

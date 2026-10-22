@@ -43,9 +43,9 @@ void pi_log (int level, const char *tag, const char *fmt, ...)
 
 void pi_restart (void)
 {
-	CKernel::Get ()->FlushDisk (TRUE);
 	CKernel::Get ()->GetLogger ()->Write ("mac", LogNotice, "Mac restart -> reboot");
-	CTimer::SimpleMsDelay (200);
+	CKernel::Get ()->FlushDisk (TRUE);		// overlay -> image
+	CKernel::Get ()->GetSDWorker ()->SyncAll ();	// image -> card, log
 	reboot ();
 }
 
@@ -53,19 +53,10 @@ volatile unsigned pi_frame_count;			// read by core 1's freeze check
 
 void pi_frame_hook (void)
 {
-	static u64 LastThrottle, LastLogSave;
+	static u64 LastThrottle;
 	u64 Now = CTimer::GetClockTicks64 ();
 	pi_frame_count++;
-	if (CKernel::Get ()->IsLogEnabled () && Now - LastLogSave >= 30000000)	// SD writes pause the Mac
-	{
-		LastLogSave = Now;
-		CKernel::Get ()->GetLogFile ()->Save ();
-	}
-	CKernel::Get ()->FlushDisk (FALSE);		// cheap unless the Mac wrote
-	if (pi_frame_count % 3 == 0)
-	{
-		CKernel::Get ()->Prefetch ();		// ~64 KB, a few ms
-	}
+	CKernel::Get ()->FlushDisk (FALSE);		// RAM only; core 2 writes the card
 	CKernel::Get ()->GetUSBInput ()->Poll ();	// USB keyboard + mouse
 	if (Now - LastThrottle >= ThrottleIntervalUs)
 	{

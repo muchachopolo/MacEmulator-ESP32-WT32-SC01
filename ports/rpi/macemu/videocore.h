@@ -1,7 +1,8 @@
 // Core 1 of the Pi 2 drives the AC-TFT35: it renders changed strips of the Mac
 // screen (mac_video_render -> display_draw -> ILI9486) and samples the XPT2046,
 // like the ESP32 build's core-0 video and touch tasks. Core 0 runs the 68k and
-// owns everything else (SD card, logging, interrupts). Only core 1 uses SPI0.
+// owns interrupts and USB; core 2 runs the SD worker (sdworker.h). Only core 1
+// uses SPI0.
 #ifndef _videocore_h
 #define _videocore_h
 

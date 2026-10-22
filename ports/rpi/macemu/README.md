@@ -2,13 +2,16 @@
 
 The unmodified emulator core (`MacintoshESPEmulator/main/*.c` + Musashi) built
 bare-metal with Circle for the Pi 2 + AC-TFT35: core 0 runs the 68k, core 1
-draws the screen and reads touch. Phases R3, R5, R6 and R7 (multi-core) of
+draws the screen and reads touch, core 2 does all SD card access (loading
+disks on demand and in the background, saving changes, the log). Phases R3, R5, R6 and R7 (multi-core) of
 [`spec/raspberry-pi-port.md`](../../../spec/raspberry-pi-port.md).
 
 | Piece | File |
 |---|---|
 | ESP-IDF API shims (timer, log, heap, FreeRTOS bits) | `shim/` → `pi_platform.h` |
 | Platform services + `display.h` API | `platform.cpp` |
+| Disk images in RAM: on-demand 1 MB chunks, background prefetch, dirty blocks | `diskimage.cpp` |
+| Core 2: SD worker (load requests, write-back, prefetch, log) | `sdworker.cpp` |
 | Core 1: renderer + touch sampler (ILI9486 at 17.9 MHz, XPT2046 with the R2 calibration, ~60 Hz) | `videocore.cpp` |
 | newlib stubs (`_sbrk`, `_write` → log, `%le` `sscanf`) | `syscalls.c` |
 | ROM + disk loaded from the SD card, disk write-back (R5) | `kernel.cpp` |

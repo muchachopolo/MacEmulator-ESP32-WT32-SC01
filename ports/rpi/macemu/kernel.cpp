@@ -1,9 +1,9 @@
 // The emulator core (MacintoshESPEmulator/main + Musashi) on a bare-metal
-// Raspberry Pi 2: core 0 runs the 68k in mac_emu_run() (its per-frame hook in
-// platform.cpp saves the disk), core 1 refreshes the LCD and samples touch
-// (videocore.cpp).
-// R5: the ROM and the disk image are files on the SD card (/mac/), and blocks
-// the Mac writes are written back to the disk image file.
+// Raspberry Pi 2: core 0 runs the 68k in mac_emu_run(), core 1 refreshes the
+// LCD and samples touch (videocore.cpp), core 2 does all SD card access once
+// the Mac runs (sdworker.cpp). The ROM and the disk images are files on the SD
+// card (/mac/); disks are loaded into RAM on demand and in the background, and
+// blocks the Mac writes are written back to the files.
 #include "kernel.h"
 #include "mac_emulator.h"
 #include "mac_disk_overlay.h"
@@ -23,14 +23,9 @@ static const char From[] = "mac";
 #endif
 static const char *const DefaultDisks[] = { "custom_753.dsk", "OS_750_boot.dsk" };
 
-// Disk images larger than this are read from the card on demand, in chunks.
-static const unsigned OnDemandMinSize = 8 * 1024 * 1024;
-static const unsigned ChunkShift = 20;			// 1 MB
-
-// Write-back: flush once the Mac has not written for this long (a file save is
-// a burst of writes), and at most this often while it keeps writing.
-static const u64 FlushQuietUs = 1000000;
-static const u64 FlushMaxDelayUs = 10000000;
+// Copy the overlay's changed blocks into the drive-1 image at most this often
+// (RAM only; the SD worker writes them to the card a second later).
+static const u64 SyncIntervalUs = 250000;
 
 // Error codes shown on the LCD (red screen + number)
 enum { ErrorSDCard = 1, ErrorROM = 2, ErrorInit = 3 };
@@ -77,15 +72,9 @@ CKernel::CKernel (void)
 	m_USBInput (&m_USBHCI),
 	m_pDisk (0),
 	m_nDiskSize (0),
-	m_nFlushedWrites (0),
-	m_nLastWriteSeen (0),
-	m_bMounted (FALSE),
-	m_bOnDemand (FALSE),
-	m_pChunkLoaded (0),
-	m_nChunks (0),
-	m_nPrefetchChunk (0),
-	m_nPrefetchPiece (0),
-	m_nDisk2LastWrite (0)
+	m_nSyncedWrites (0),
+	m_nLastSync (0),
+	m_bMounted (FALSE)
 {
 	s_pThis = this;
 	m_bLog = FALSE;
@@ -224,125 +213,10 @@ void CKernel::ReadConfig (void)
 	free (pText);
 }
 
-void CKernel::OpenOnDemand (const char *pPath, unsigned nSize)
-{
-	if (f_open (&m_DiskFile, pPath, FA_READ | FA_WRITE | FA_OPEN_EXISTING) != FR_OK)
-	{
-		m_Logger.Write (From, LogError, "%s: cannot open", pPath);
-		return;
-	}
-	m_nChunks = (nSize + (1u << ChunkShift) - 1) >> ChunkShift;
-	m_pDisk = (u8 *) malloc (nSize);
-	m_pChunkLoaded = (u8 *) calloc (m_nChunks, 1);
-	if (!m_pDisk || !m_pChunkLoaded)
-	{
-		free (m_pDisk);
-		free (m_pChunkLoaded);
-		m_pDisk = 0;
-		m_pChunkLoaded = 0;
-		f_close (&m_DiskFile);
-		m_Logger.Write (From, LogError, "%s: no memory for %u bytes", pPath, nSize);
-		return;
-	}
-	m_nDiskSize = nSize;
-	m_bOnDemand = TRUE;
-	disk_ov_fill = DiskFill;
-	DiskFill (0, 1);				// boot blocks + MDB (logged by the core)
-	m_Logger.Write (From, LogNotice, "%s: %u bytes, loaded on demand", pPath, nSize);
-}
-
+// disk_ov_fill: the overlay is about to read drive-1 bytes
 void CKernel::DiskFill (uint32_t nOffset, uint32_t nCount)
 {
-	CKernel *pThis = s_pThis;
-	if (!nCount || nOffset >= pThis->m_nDiskSize)
-	{
-		return;
-	}
-	unsigned nLast = (nOffset + nCount - 1) >> ChunkShift;
-	for (unsigned c = nOffset >> ChunkShift; c <= nLast && c < pThis->m_nChunks; c++)
-	{
-		if (pThis->m_pChunkLoaded[c])
-		{
-			continue;
-		}
-		pThis->m_pChunkLoaded[c] = 1;		// don't retry a failing chunk
-		unsigned nPos = c << ChunkShift;
-		unsigned n = pThis->m_nDiskSize - nPos < (1u << ChunkShift)
-			     ? pThis->m_nDiskSize - nPos : 1u << ChunkShift;
-		UINT nRead = 0;
-		static unsigned s_nLogged;
-		boolean bLog = s_nLogged < 20;
-		if (bLog)
-		{
-			s_nLogged++;
-		}
-		u64 nStart = CTimer::GetClockTicks64 ();
-		FRESULT Res = f_lseek (&pThis->m_DiskFile, nPos);
-		if (Res == FR_OK)
-		{
-			Res = ReadPieces (&pThis->m_DiskFile, pThis->m_pDisk + nPos, n);
-			nRead = Res == FR_OK ? n : 0;
-		}
-		if (Res != FR_OK || nRead != n)
-		{
-			pThis->m_Logger.Write (From, LogError, "disk read failed at %u (FatFs %d, %u bytes)",
-					       nPos, Res, nRead);
-		}
-		else if (bLog)
-		{
-			// CRC-32 (zlib) of the loaded chunk, to compare with the file on a PC
-			u32 nCRC = 0xFFFFFFFF;
-			const u8 *p = pThis->m_pDisk + nPos;
-			for (unsigned i = 0; i < n; i++)
-			{
-				nCRC ^= p[i];
-				for (unsigned k = 0; k < 8; k++)
-				{
-					nCRC = (nCRC >> 1) ^ (0xEDB88320 & (0 - (nCRC & 1)));
-				}
-			}
-			pThis->m_Logger.Write (From, LogNotice, "disk chunk %u loaded in %u ms, crc %08X", c,
-					       (unsigned) ((CTimer::GetClockTicks64 () - nStart) / 1000),
-					       nCRC ^ 0xFFFFFFFF);
-		}
-	}
-}
-
-void CKernel::Prefetch (void)
-{
-	if (m_bOnDemand)				// drive 1 first, then drive 2
-	{
-		const unsigned nPiece = 0x10000, nPieces = (1u << ChunkShift) / nPiece;
-		while (m_nPrefetchChunk < m_nChunks && m_pChunkLoaded[m_nPrefetchChunk])
-		{
-			m_nPrefetchChunk++;
-			m_nPrefetchPiece = 0;
-		}
-		if (m_nPrefetchChunk < m_nChunks)
-		{
-			unsigned nPos = (m_nPrefetchChunk << ChunkShift) + m_nPrefetchPiece * nPiece;
-			unsigned n = nPos < m_nDiskSize
-				     ? (m_nDiskSize - nPos < nPiece ? m_nDiskSize - nPos : nPiece) : 0;
-			if (n && (   f_lseek (&m_DiskFile, nPos) != FR_OK
-				  || ReadPieces (&m_DiskFile, m_pDisk + nPos, n) != FR_OK))
-			{
-				m_Logger.Write (From, LogError, "prefetch failed at %u", nPos);
-				m_nPrefetchChunk = m_nChunks;
-				return;
-			}
-			if (++m_nPrefetchPiece >= nPieces || nPos + n >= m_nDiskSize)
-			{
-				m_pChunkLoaded[m_nPrefetchChunk++] = 1;
-				m_nPrefetchPiece = 0;
-				if (m_nPrefetchChunk == m_nChunks)
-				{
-					m_Logger.Write (From, LogNotice, "%s: all in RAM", m_DiskName);
-				}
-			}
-			return;
-		}
-	}
-	m_Disk2.PrefetchStep ();
+	s_pThis->m_Disk1.Ensure (nOffset, nCount);
 }
 
 boolean CKernel::LoadImages (void)
@@ -382,14 +256,12 @@ boolean CKernel::LoadImages (void)
 		{
 			CString Path;
 			Path.Format (MAC_DIR "%s", m_DiskName);
-			FILINFO Info;
-			if (f_stat (Path, &Info) == FR_OK && Info.fsize > OnDemandMinSize)
+			if (m_Disk1.Open (Path))
 			{
-				OpenOnDemand (Path, (unsigned) Info.fsize);
-			}
-			else
-			{
-				m_pDisk = LoadFile (Path, &m_nDiskSize);
+				m_pDisk = m_Disk1.GetData ();
+				m_nDiskSize = m_Disk1.GetSize ();
+				m_Disk1.Load (0, 1);		// boot blocks + MDB
+				disk_ov_fill = DiskFill;
 			}
 		}
 	}
@@ -426,94 +298,40 @@ boolean CKernel::LoadImages (void)
 
 int CKernel::Drive2IO (bool bWrite, uint8_t *pBuffer, uint32_t nOffset, uint32_t nCount)
 {
-	s_pThis->m_nDisk2LastWrite = bWrite ? CTimer::GetClockTicks64 () : s_pThis->m_nDisk2LastWrite;
 	return bWrite ? s_pThis->m_Disk2.Write (pBuffer, nOffset, nCount)
 		      : s_pThis->m_Disk2.Read (pBuffer, nOffset, nCount);
 }
 
+// Drive 1 goes through the core's copy-on-write overlay: copy the blocks the
+// Mac changed into the image (RAM) and mark them dirty; the SD worker writes
+// them to the card. Cheap (no SD access), called from the frame hook.
 void CKernel::FlushDisk (boolean bForce)
 {
-	if (m_Disk2.IsDirty ()
-	    && (bForce || CTimer::GetClockTicks64 () - m_nDisk2LastWrite >= FlushQuietUs))
-	{
-		unsigned n = m_Disk2.Flush ();
-		m_Logger.Write (From, LogNotice, "%s: saved %u blocks", m_Disk2Name, n);
-	}
-
 	if (!m_pDisk || !disk_ov_active ())
 	{
 		return;
 	}
 	unsigned nWrites = disk_ov_write_count ();
-	if (nWrites == m_nFlushedWrites)
-	{
-		return;
-	}
 	u64 nNow = CTimer::GetClockTicks64 ();
-	static unsigned s_nSeen;
-	static u64 s_nFirstPending;
-	if (nWrites != s_nSeen)
-	{
-		if (s_nSeen == m_nFlushedWrites)
-		{
-			s_nFirstPending = nNow;			// first write since the last flush
-		}
-		s_nSeen = nWrites;
-		m_nLastWriteSeen = nNow;
-	}
-	if (!bForce && nNow - m_nLastWriteSeen < FlushQuietUs
-	    && nNow - s_nFirstPending < FlushMaxDelayUs)
+	if (nWrites == m_nSyncedWrites || (!bForce && nNow - m_nLastSync < SyncIntervalUs))
 	{
 		return;
 	}
-
-	CString Path;
-	Path.Format (MAC_DIR "%s", m_DiskName);
-	FIL File;
-	FIL *pFile = &m_DiskFile;
-	if (!m_bOnDemand)
-	{
-		pFile = &File;
-		if (f_open (&File, Path, FA_WRITE | FA_OPEN_EXISTING) != FR_OK)
-		{
-			m_Logger.Write (From, LogError, "%s: cannot open for writing", (const char *) Path);
-			m_nFlushedWrites = nWrites;		// don't retry every frame
-			return;
-		}
-	}
-	unsigned nBlocks = 0;
+	m_nSyncedWrites = nWrites;
+	m_nLastSync = nNow;
 	u8 Block[DISK_OV_BLOCK];
 	for (int32_t nBlock = disk_ov_next_written (0); nBlock >= 0;
 	     nBlock = disk_ov_next_written (nBlock + 1))
 	{
 		unsigned nOffset = (unsigned) nBlock * DISK_OV_BLOCK;
 		unsigned nLen = m_nDiskSize - nOffset < DISK_OV_BLOCK ? m_nDiskSize - nOffset : DISK_OV_BLOCK;
-		disk_ov_read (Block, nOffset, nLen);
-		if (memcmp (Block, m_pDisk + nOffset, nLen) == 0)
+		disk_ov_read (Block, nOffset, nLen);		// loaded: it was written
+		if (memcmp (Block, m_pDisk + nOffset, nLen) != 0)
 		{
-			continue;
+			memcpy (m_pDisk + nOffset, Block, nLen);
+			m_Disk1.MarkDirty (nOffset, nLen);
 		}
-		UINT nWritten = 0;
-		if (f_lseek (pFile, nOffset) != FR_OK
-		    || f_write (pFile, Block, nLen, &nWritten) != FR_OK || nWritten != nLen)
-		{
-			m_Logger.Write (From, LogError, "%s: write failed at %u", (const char *) Path, nOffset);
-			break;
-		}
-		memcpy (m_pDisk + nOffset, Block, nLen);	// the file now holds it
-		nBlocks++;
 	}
-	if (m_bOnDemand)
-	{
-		f_sync (pFile);
-	}
-	else
-	{
-		f_close (&File);
-	}
-	m_nFlushedWrites = nWrites;
-	s_nSeen = nWrites;
-	m_Logger.Write (From, LogNotice, "%s: saved %u blocks", (const char *) Path, nBlocks);
 }
 
 TShutdownMode CKernel::Run (void)
@@ -543,7 +361,10 @@ TShutdownMode CKernel::Run (void)
 	{
 		m_LogFile.Save (TRUE);
 	}
-	if (!m_VideoCore.Initialize ())				// starts core 1
+	m_SDWorker.SetImages (m_Disk1.IsOpen () ? &m_Disk1 : 0, m_Disk2.IsOpen () ? &m_Disk2 : 0);
+	m_SDWorker.SetLog (&m_LogFile, m_bLog);
+	m_SDWorker.Start ();
+	if (!m_VideoCore.Initialize ())				// starts cores 1 and 2
 	{
 		m_Logger.Write (From, LogPanic, "cannot start core 1");
 		return ShutdownHalt;

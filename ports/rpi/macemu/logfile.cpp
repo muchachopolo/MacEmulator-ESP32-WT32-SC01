@@ -43,12 +43,17 @@ void CLogFile::Save (boolean bForce)
 		return;
 	}
 	m_nSaved = m_nSerial;
+	static char s_Copy[BufferSize];			// other cores keep logging meanwhile
+	m_Lock.Acquire ();
+	unsigned nUsed = m_nUsed;
+	memcpy (s_Copy, m_Buffer, nUsed);
+	m_Lock.Release ();
 	FIL File;
 	if (f_open (&File, LOG_FILE, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK)
 	{
 		return;
 	}
 	UINT nWritten;
-	f_write (&File, m_Buffer, m_nUsed, &nWritten);	// a racing Write only adds at the end
+	f_write (&File, s_Copy, nUsed, &nWritten);
 	f_close (&File);
 }

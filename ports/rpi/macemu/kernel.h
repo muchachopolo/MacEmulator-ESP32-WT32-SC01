@@ -21,6 +21,7 @@
 #include "usbinput.h"
 #include "logfile.h"
 #include "diskimage.h"
+#include "sdworker.h"
 
 enum TShutdownMode
 {
@@ -46,18 +47,14 @@ public:
 	CLogFile *GetLogFile (void) { return &m_LogFile; }
 	boolean IsLogEnabled (void) const { return m_bLog; }	// /mac/config.txt log=1
 
-	// Write the blocks the Mac changed back to the disk image file.
-	// bForce: also when the last write is recent (restart, shutdown).
+	// Copy the blocks the Mac changed on drive 1 into its image (RAM; the
+	// SD worker writes them). bForce: now, not at most every 250 ms.
 	void FlushDisk (boolean bForce);
-
-	// Frame hook: load a little more of the on-demand disks in the
-	// background, so the Mac doesn't pause on first access later.
-	void Prefetch (void);
+	CSDWorker *GetSDWorker (void) { return &m_SDWorker; }
 
 private:
 	boolean LoadImages (void);
 	u8 *LoadFile (const char *pName, unsigned *pSize);
-	void OpenOnDemand (const char *pPath, unsigned nSize);
 	void ReadConfig (void);
 	void ShowError (unsigned nCode);
 	static void PanicHandler (void);
@@ -87,22 +84,15 @@ private:
 
 	boolean		m_bLog;				// /mac/config.txt "log=1"
 	char		m_DiskName[64];			// /mac/config.txt "disk="
-	u8		*m_pDisk;			// pristine copy = what the file holds
+	u8		*m_pDisk;			// drive-1 image data (m_Disk1)
 	unsigned	m_nDiskSize;
-	unsigned	m_nFlushedWrites;		// disk_ov_write_count() at the last flush
-	u64		m_nLastWriteSeen;		// when that count last changed
+	unsigned	m_nSyncedWrites;		// disk_ov_write_count() at the last sync
+	u64		m_nLastSync;
 	boolean		m_bMounted;
-	// Big images are loaded on demand in 1 MB chunks (DiskFill); the file
-	// stays open for reading the rest and for saving.
-	boolean		m_bOnDemand;
-	FIL		m_DiskFile;
-	u8		*m_pChunkLoaded;		// one byte per chunk
-	unsigned	m_nChunks;
-	unsigned	m_nPrefetchChunk, m_nPrefetchPiece;
-
+	CDiskImage	m_Disk1;
 	char		m_Disk2Name[64];		// /mac/config.txt "disk2=" (LC II)
 	CDiskImage	m_Disk2;
-	u64		m_nDisk2LastWrite;
+	CSDWorker	m_SDWorker;			// core 2: all SD access after start
 
 	static CKernel *s_pThis;
 };

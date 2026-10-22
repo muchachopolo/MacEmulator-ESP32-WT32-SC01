@@ -1,7 +1,8 @@
-// A disk image file on the SD card served from RAM: 1 MB chunks are read on
-// first use (64 KB pieces through a bounce buffer), writes go to RAM and mark
-// 512-byte blocks dirty, Flush() writes the dirty blocks back. Used for drive
-// 2 (MAC_DRIVE2); drive 1 keeps the core's copy-on-write overlay.
+// A disk image file on the SD card served from RAM. 1 MB chunks are read on
+// first use or in the background (prefetch); written blocks are marked dirty
+// and written back later. File access happens on one core only (the SD worker
+// on core 2 once it runs, see sdworker.h); the emulator (core 0) only touches
+// RAM and asks the worker for chunks it needs now.
 #ifndef _diskimage_h
 #define _diskimage_h
 
@@ -16,27 +17,35 @@ public:
 	boolean Open (const char *pPath);		// FALSE: missing / no memory
 	boolean IsOpen (void) const { return m_pData != 0; }
 	unsigned GetSize (void) const { return m_nSize; }
+	u8 *GetData (void) { return m_pData; }
+	const char *GetName (void) const { return m_Name; }
 
+	// --- emulator side (core 0) --------------------------------------------
+	boolean IsLoaded (unsigned nOffset, unsigned nCount) const;
+	void Ensure (unsigned nOffset, unsigned nCount);	// load now (via the worker)
 	int Read (u8 *pBuffer, unsigned nOffset, unsigned nCount);	// 0 or Mac error
-	int Write (const u8 *pBuffer, unsigned nOffset, unsigned nCount);
-	boolean IsDirty (void) const { return m_nDirty != 0; }
-	unsigned Flush (void);				// returns blocks written
+	int Write (const u8 *pBuffer, unsigned nOffset, unsigned nCount);	// RAM + dirty
+	void MarkDirty (unsigned nOffset, unsigned nCount);	// RAM already updated
+	u64 GetLastWrite (void) const { return m_nLastWrite; }
 
-	// Background loading: read one 64 KB piece of the next chunk not yet
-	// in RAM. FALSE when everything is loaded.
-	boolean PrefetchStep (void);
+	// --- file side (SD worker, or core 0 before the worker starts) ----------
+	boolean Load (unsigned nOffset, unsigned nCount);
+	boolean PrefetchStep (void);			// one 64 KB piece; FALSE: all loaded
+	boolean HasDirty (void) const { return m_bDirty; }
+	unsigned FlushDirty (void);			// returns blocks written
 
 private:
-	boolean Load (unsigned nOffset, unsigned nCount);
-
 	FIL m_File;
+	char m_Name[64];
 	u8 *m_pData;
 	unsigned m_nSize;
-	u8 *m_pChunkLoaded;
+	volatile u8 *m_pChunkLoaded;			// one byte per 1 MB chunk
 	unsigned m_nChunks;
-	u8 *m_pDirty;					// one bit per 512-byte block
-	unsigned m_nDirty;
+	volatile u8 *m_pDirty;				// one byte per 512-byte block
+	volatile boolean m_bDirty;
+	volatile u64 m_nLastWrite;
 	unsigned m_nPrefetchChunk, m_nPrefetchPiece;
+	boolean m_bAllLoaded;
 };
 
 #endif
