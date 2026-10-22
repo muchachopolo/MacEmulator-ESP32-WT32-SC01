@@ -220,6 +220,7 @@ Details: `docs/display-pipeline.md#touch-input`.
 | `EGRET_ONE_SEC_TICKS` [1] | mac_egret.c | Egret/Cuda 1 Hz tick packets (Mac clock advances) |
 | `DISK_WRITABLE` [1] | mac_disk_overlay.h | PSRAM copy-on-write disk overlay, volume unlocked |
 | `DISK_OVERLAY_KB` [384 Classic / 256 LC II] | mac_disk_overlay.h | Overlay pool size |
+| `MAC_KEYBOARD` [0] | mac_kbd.h | Keyboard input (`kbd_key`, ADB codes): LC II = ADB keyboard at address 2 on the Egret HLE; Classic = C mirror of the ROM keyboard handler (KeyMap, auto-key, PostEvent, US layout). Pi port: 1 |
 | `MAC_EXTERNAL_IMAGES` [0] | mac_emulator.h | ROM/disk set at run time via `mac_ext_rom`/`mac_ext_disk` (Raspberry Pi port, from SD) instead of linked-in `_binary_*` symbols |
 | `MAC_DIAG` [0] | mac_memory.h | Boot diagnostics/spin detectors on memory hot paths |
 | `MAC_VIDEO_DIRTY` [1] | mac_video.c | Skip unchanged 20-line strips |

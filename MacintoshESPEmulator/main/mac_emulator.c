@@ -18,6 +18,7 @@
 #include "mac_egret.h"
 #endif
 #include "mac_touch.h"
+#include "mac_kbd.h"
 #include "m68k.h"
 
 #include <string.h>
@@ -482,9 +483,9 @@ static EVQ_UNUSED void evq_append(uint8_t *r, uint32_t el)
 }
 
 /* ROM PostEvent (Classic $403EE6; same code in the LC II ROM) for an event
- * with message 0, posted at 'where' (a Mac Point, v<<16|h).
+ * with message 'msg', posted at 'where' (a Mac Point, v<<16|h).
  * Returns 0 = posted, 1 = masked by SysEvtMask, -1 = no element. */
-static EVQ_UNUSED int mac_post_event_rom(uint8_t *r, int what, uint32_t where)
+static EVQ_UNUSED int mac_post_event_rom(uint8_t *r, int what, uint32_t where, uint32_t msg)
 {
     uint32_t top = mac_mem_get_ram_size();
     if (!(rd16(r, SYS_EVT_MASK) & (1u << what))) return 1;   /* evtNotEnb */
@@ -504,7 +505,7 @@ static EVQ_UNUSED int mac_post_event_rom(uint8_t *r, int what, uint32_t where)
     }
     uint16_t km = rd16(r, KEYMAP_MODS);
     wr16(r, el + 6,  (uint16_t)what);                /* evtQWhat */
-    wr32(r, el + 8,  0);                             /* evtQMessage */
+    wr32(r, el + 8,  msg);                           /* evtQMessage */
     wr32(r, el + 12, rd32(r, TICKS_GLOBAL));         /* evtQWhen */
     wr32(r, el + 16, where);                         /* evtQWhere */
     r[el + 20] = (uint8_t)((km << 1) | (km >> 15));  /* ROL.W #1, low byte */
@@ -558,7 +559,7 @@ static EVQ_UNUSED void mac_post_mouse_event(uint8_t *r, bool down, int mx, int m
         where = (1u << 16) | (where & 0xFFFF);
 #endif
     }
-    int rc = mac_post_event_rom(r, down ? 1 : 2, where);
+    int rc = mac_post_event_rom(r, down ? 1 : 2, where, 0);
     if (rc < 0) {
         static int fail_log;
         if (fail_log++ < 5)
@@ -566,6 +567,14 @@ static EVQ_UNUSED void mac_post_mouse_event(uint8_t *r, bool down, int mx, int m
                      (unsigned long)rd32(r, SYS_EVT_BUF));
     }
 }
+
+#if MAC_KEYBOARD && !MAC_ROM_LC_II
+/* Keyboard events (mac_kbd.c), posted at Mouse like the ROM's handler. */
+int mac_post_event_msg(uint8_t *r, int what, uint32_t message)
+{
+    return mac_post_event_rom(r, what, rd32(r, MOUSE_PT), message);
+}
+#endif
 
 /* Button transitions waiting for a point where the 68k could take an
  * interrupt (SR mask 0). After 30 frames without one they are posted
@@ -3923,6 +3932,9 @@ void mac_emu_run(void *param)
             touch_poll_inline(esp_timer_get_time());
             touch_report_t tr;
             touch_consume(&tr);
+#if MAC_KEYBOARD
+            kbd_frame();
+#endif
 #if TOUCH_GAME_MODE
             game_mode_track(mac_mem_get_ram());
 #endif

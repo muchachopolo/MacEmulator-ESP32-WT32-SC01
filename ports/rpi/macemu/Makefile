@@ -27,9 +27,9 @@ O          := obj-$(MACHINE)
 
 CORE_SRCS    := mac_emulator.c mac_memory.c mac_video.c mac_via.c mac_scc.c mac_scsi.c \
                 mac_iwm.c mac_egret.c mac_v8video.c mac_v8disk.c mac_touch.c mac_rtc.c \
-                mac_disk_overlay.c
+                mac_disk_overlay.c mac_kbd.c
 MUSASHI_SRCS := m68kcpu.c m68kops.c softfloat/softfloat.c mac_native.c
-PI_SRCS      := main.cpp kernel.cpp platform.cpp videocore.cpp
+PI_SRCS      := main.cpp kernel.cpp platform.cpp videocore.cpp usbinput.cpp
 COMMON_SRCS  := ili9486.cpp xpt2046.cpp
 
 OBJS	= $(addprefix $(O)/,$(PI_SRCS:.cpp=.o)) $(O)/syscalls.o \
@@ -39,14 +39,17 @@ OBJS	= $(addprefix $(O)/,$(PI_SRCS:.cpp=.o)) $(O)/syscalls.o \
 
 # HOST_BUILD=1 selects the non-ESP-IDF paths of the core (native-order RGB565,
 # inline touch polling, no FreeRTOS); the Pi keeps the real-time throttle and
-# supplies the ROM and disk at run time (MAC_EXTERNAL_IMAGES).
+# supplies the ROM and disk at run time (MAC_EXTERNAL_IMAGES) and a USB keyboard
+# (MAC_KEYBOARD).
 EMU_DEFS = -DHOST_BUILD=1 -DMAC_FRAME_THROTTLE=1 -DMAC_EXTERNAL_IMAGES=1 -DHAS_DISK_IMAGE=1 \
+	   -DMAC_KEYBOARD=1 \
 	   -DMAC_ROM_LC_II=$(MAC_ROM_LC_II) -DMAC_V8_CUDA=0 $(EXTRA_DEFS)
 
 EXTRAINCLUDE = -I shim -I ../common -I $(EMU)/main -I $(EMU)/components/musashi \
 	       -I $(EMU)/components/display/include
 
 LIBS	= $(CIRCLEHOME)/addon/fatfs/libfatfs.a $(CIRCLEHOME)/addon/SDCard/libsdcard.a \
+	  $(CIRCLEHOME)/lib/usb/libusb.a $(CIRCLEHOME)/lib/input/libinput.a \
 	  $(CIRCLEHOME)/lib/fs/libfs.a $(CIRCLEHOME)/lib/libcircle.a
 
 CHECK_DEPS = 0

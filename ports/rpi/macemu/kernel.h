@@ -18,6 +18,7 @@
 #include "ili9486.h"
 #include "xpt2046.h"
 #include "videocore.h"
+#include "usbinput.h"
 
 enum TShutdownMode
 {
@@ -39,6 +40,7 @@ public:
 	CILI9486 *GetLCD (void) { return &m_LCD; }
 	CXPT2046 *GetTouch (void) { return &m_Touch; }
 	CCPUThrottle *GetCPUThrottle (void) { return &m_CPUThrottle; }
+	CUSBInput *GetUSBInput (void) { return &m_USBInput; }
 
 	// Write the blocks the Mac changed back to the disk image file.
 	// bForce: also when the last write is recent (restart, shutdown).
@@ -67,6 +69,8 @@ private:
 	CEMMCDevice		m_EMMC;
 	FATFS			m_FileSystem;
 	CVideoCore		m_VideoCore;
+	CUSBHCIDevice		m_USBHCI;
+	CUSBInput		m_USBInput;
 
 	char		m_DiskName[64];			// /mac/config.txt "disk="
 	u8		*m_pDisk;			// pristine copy = what the file holds

@@ -55,6 +55,7 @@ idf_component_register(
          "mac_v8disk.c"
          "mac_rtc.c"
          "mac_disk_overlay.c"
+         "mac_kbd.c"
     INCLUDE_DIRS "."
     REQUIRES log driver esp_timer display musashi freertos esp_psram
     EMBED_FILES ${EMBED_FILES}

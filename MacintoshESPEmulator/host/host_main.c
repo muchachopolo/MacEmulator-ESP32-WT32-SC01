@@ -19,6 +19,7 @@
 #include "mac_iwm.h"
 #include "mac_disk_overlay.h"
 #include "mac_video.h"
+#include "mac_kbd.h"
 #include "display.h"
 #include "esp_timer.h"
 #include "freertos/task.h"
@@ -168,9 +169,55 @@ struct host_swipe { long f, n; int dx, dy; };
 extern struct host_swipe host_swipes[16];
 extern int host_nswipes;
 
+/* Scripted keyboard (MAC_KEYBOARD builds): --type F:TEXT, --key F:HH[+HH..].
+ * Each key goes down at its frame and up HOST_KEY_HOLD frames later; typed
+ * characters are HOST_KEY_GAP frames apart. */
+#define HOST_KEY_HOLD 6
+#define HOST_KEY_GAP  12
+static struct { long f; uint8_t code; bool down; } host_keys[1024];
+static int host_nkeys;
+
+static void host_key_add(long f, uint8_t code, bool down)
+{
+    if (host_nkeys < (int)(sizeof host_keys / sizeof host_keys[0])) {
+        host_keys[host_nkeys].f = f;
+        host_keys[host_nkeys].code = code;
+        host_keys[host_nkeys].down = down;
+        host_nkeys++;
+    }
+}
+
+/* US layout: ASCII -> ADB key code, bit 7 = needs Shift */
+static int host_ascii_adb(char c)
+{
+    static const struct { char c; uint8_t k; } map[] = {
+        {'a',0x00},{'s',0x01},{'d',0x02},{'f',0x03},{'h',0x04},{'g',0x05},{'z',0x06},{'x',0x07},
+        {'c',0x08},{'v',0x09},{'b',0x0B},{'q',0x0C},{'w',0x0D},{'e',0x0E},{'r',0x0F},{'y',0x10},
+        {'t',0x11},{'1',0x12},{'2',0x13},{'3',0x14},{'4',0x15},{'6',0x16},{'5',0x17},{'=',0x18},
+        {'9',0x19},{'7',0x1A},{'-',0x1B},{'8',0x1C},{'0',0x1D},{']',0x1E},{'o',0x1F},{'u',0x20},
+        {'[',0x21},{'i',0x22},{'p',0x23},{'\n',0x24},{'l',0x25},{'j',0x26},{'\'',0x27},{'k',0x28},
+        {';',0x29},{'\\',0x2A},{',',0x2B},{'/',0x2C},{'n',0x2D},{'m',0x2E},{'.',0x2F},{'\t',0x30},
+        {' ',0x31},{'`',0x32},
+        {'!',0x92},{'@',0x93},{'#',0x94},{'$',0x95},{'^',0x96},{'%',0x97},{'+',0x98},{'(',0x99},
+        {'&',0x9A},{'_',0x9B},{'*',0x9C},{')',0x9D},{'}',0x9E},{'{',0xA1},{'"',0xA7},{':',0xA9},
+        {'|',0xAA},{'<',0xAB},{'?',0xAC},{'>',0xAF},{'~',0xB2},
+    };
+    if (c >= 'A' && c <= 'Z') return host_ascii_adb((char)(c - 'A' + 'a')) | 0x80;
+    for (size_t i = 0; i < sizeof map / sizeof map[0]; i++)
+        if (map[i].c == c) return map[i].k;
+    return -1;
+}
+
+static void host_keys_frame(void)
+{
+    for (int i = 0; i < host_nkeys; i++)
+        if (host_keys[i].f == frames) kbd_key(host_keys[i].code, host_keys[i].down);
+}
+
 void host_frame_hook(void)
 {
     frames++;
+    host_keys_frame();
     if (opt_vclock > 0) host_vclock_us = (int64_t)frames * opt_vclock;
     /* Event queue sanity: EvQHdr.qHead/qTail ($014C/$0150) must never
      * point into the vector table ($00-$FF), as the old Classic-style
@@ -361,6 +408,8 @@ static void usage(const char *argv0)
         "  --disk-out FILE save the image as written (flash + overlay) to FILE at exit\n"
         "  --cpu 68000|68020|68030  override the CPU type mac_emu_init() set (re-pulses reset)\n"
         "  --tap F                  scripted touch tap starting at frame F (repeatable, max 16)\n"
+        "  --type F:TEXT            (MAC_KEYBOARD=1) type TEXT from frame F (\\n = Return)\n"
+        "  --key F:HH[+HH..]        (MAC_KEYBOARD=1) press ADB key codes together, e.g. 37+0C = Cmd-Q\n"
         "  --swipe F:dx:dy[:N]      scripted swipe from frame F over N frames (default 2000),\n"
         "                           moving the cursor (dx,dy) screen px; a --tap ending <400 ms\n"
         "                           before it makes it a tap-then-drag (repeatable, max 16)\n"
@@ -395,6 +444,34 @@ int main(int argc, char **argv)
                 usage(argv[0]); return 2;
             }
             if (host_nswipes < 16) host_swipes[host_nswipes++] = w;
+            i++;
+        }
+        else if (!strcmp(a, "--type") && v) {
+            char *e; long f = strtol(v, &e, 10);
+            if (*e != ':') { usage(argv[0]); return 2; }
+            for (const char *p = e + 1; *p; p++) {
+                char c = *p;
+                if (c == '\\' && p[1] == 'n') { c = '\n'; p++; }
+                int k = host_ascii_adb(c);
+                if (k < 0) continue;
+                if (k & 0x80) host_key_add(f, ADB_KEY_SHIFT, true);
+                host_key_add(f + 1, (uint8_t)(k & 0x7F), true);
+                host_key_add(f + 1 + HOST_KEY_HOLD, (uint8_t)(k & 0x7F), false);
+                if (k & 0x80) host_key_add(f + 2 + HOST_KEY_HOLD, ADB_KEY_SHIFT, false);
+                f += HOST_KEY_GAP;
+            }
+            i++;
+        }
+        else if (!strcmp(a, "--key") && v) {
+            char *e; long f = strtol(v, &e, 10);
+            uint8_t ks[8]; int nk = 0;
+            while (*e == ':' || *e == '+') {
+                if (nk < 8) ks[nk++] = (uint8_t)strtoul(e + 1, &e, 16);
+                else break;
+            }
+            if (!nk) { usage(argv[0]); return 2; }
+            for (int k = 0; k < nk; k++) host_key_add(f + k, ks[k], true);
+            for (int k = nk - 1; k >= 0; k--) host_key_add(f + nk + HOST_KEY_HOLD + (nk - 1 - k), ks[k], false);
             i++;
         }
         else if (!strcmp(a, "--tap") && v) {

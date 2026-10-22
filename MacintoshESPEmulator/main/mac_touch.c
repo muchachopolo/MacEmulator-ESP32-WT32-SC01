@@ -147,6 +147,15 @@ void touch_sample(int64_t now_us)
     T_UNLOCK();
 }
 
+void touch_mouse_input(int dx, int dy, bool button)
+{
+    T_LOCK();
+    sh.acc_dx += dx;
+    sh.acc_dy += dy;
+    push_btn(button);
+    T_UNLOCK();
+}
+
 void touch_consume(touch_report_t *rep)
 {
     memset(rep, 0, sizeof(*rep));

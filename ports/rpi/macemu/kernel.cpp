@@ -42,6 +42,8 @@ CKernel::CKernel (void)
 	m_Touch (&m_SPI),
 	m_EMMC (&m_Interrupt, &m_Timer, &m_ActLED),
 	m_VideoCore (CMemorySystem::Get ()),
+	m_USBHCI (&m_Interrupt, &m_Timer, TRUE),		// TRUE: plug-and-play
+	m_USBInput (&m_USBHCI),
 	m_pDisk (0),
 	m_nDiskSize (0),
 	m_nFlushedWrites (0),
@@ -65,6 +67,7 @@ boolean CKernel::Initialize (void)
 	if (bOK) bOK = m_Timer.Initialize ();
 	if (bOK) bOK = m_SPI.Initialize ();
 	if (bOK) bOK = m_EMMC.Initialize ();
+	if (bOK) bOK = m_USBHCI.Initialize ();
 	return bOK;
 }
 

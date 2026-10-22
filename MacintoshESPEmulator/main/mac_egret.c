@@ -30,6 +30,7 @@
  * SysSes without looking at TREQ and would read a tick as its reply.
  */
 #include "mac_egret.h"
+#include "mac_kbd.h"
 #include "mac_via.h"
 #include <stdio.h>
 #include <string.h>
@@ -67,6 +68,7 @@ static struct {
     int log_cnt;
     bool unsolicited;           /* reply[] holds an unsolicited packet */
     bool unsol_tick;            /* ... and it is a tick packet, not ADB */
+    bool unsol_kbd;             /* ... an ADB keyboard packet (MAC_KEYBOARD) */
     bool sec_mode_set;          /* SET_ONE_SECOND_MODE seen */
     uint8_t sec_mode;           /* its argument */
     int ticks_pending;          /* one-second ticks not yet delivered */
@@ -192,10 +194,13 @@ static void unsolicited_untake(void)
 {
     if (eg.unsol_tick) {
         if (eg.ticks_pending < 4) eg.ticks_pending++;
+    } else if (eg.unsol_kbd) {
+        kbd_adb_untake();
     } else {
         mouse_untake();
     }
     eg.unsol_tick = false;
+    eg.unsol_kbd = false;
 }
 
 static void schedule(int action)
@@ -228,7 +233,39 @@ static void adb_command(uint8_t cmd, const uint8_t *a, int na)
 
     if ((cmd & 0x0F) == 0x00) {                 /* SendReset */
         mouse_reset();
+#if MAC_KEYBOARD
+        kbd_adb_reset();
+#endif
         flag = 0x00;
+#if MAC_KEYBOARD
+    } else if (addr == kbd_adb_addr() && addr != ms.addr) {
+        /* ADB keyboard: Talk R0 = up to two key codes (bit 7 = up),
+         * Talk R2 = modifier/LED state (all released), Talk R3 = id. */
+        if ((cmd & 0x0F) == 0x01) {             /* Flush */
+            flag = 0x00;
+        } else if (kind == 3 && reg == 3) {
+            data[0] = 0x60 | addr;
+            data[1] = kbd_adb_handler();
+            nd = 2;
+            flag = 0x00;
+        } else if (kind == 3 && reg == 2) {
+            data[0] = 0xFF;
+            data[1] = 0xFF;
+            nd = 2;
+            flag = 0x00;
+        } else if (kind == 3 && reg == 0) {
+            if (kbd_adb_pending()) {
+                kbd_adb_take_r0(data);
+                nd = 2;
+                flag = 0x00;
+            }
+        } else if (kind == 2 && reg == 3 && na >= 2) {
+            kbd_adb_listen_r3(a[0], a[1]);
+            flag = 0x00;
+        } else if (kind == 2) {
+            flag = 0x00;
+        }
+#endif
     } else if (addr != ms.addr) {
         flag = (kind == 2) ? 0x00 : 0x02;       /* Listen gets no answer anyway */
     } else if ((cmd & 0x0F) == 0x01) {          /* Flush */
@@ -462,11 +499,34 @@ static void autopoll(int cycles)
         reply_hdr(0x03, 0x00, 0x00);
         eg.unsolicited = true;
         eg.unsol_tick = true;
+        eg.unsol_kbd = false;
         eg.state = EG_ATTN;
         schedule(ACT_ATTN);
         return;
     }
-    if (eg.poll_wait > 0 || !eg.autopoll || !mouse_pending())
+    if (eg.poll_wait > 0 || !eg.autopoll)
+        return;
+#if MAC_KEYBOARD
+    /* Keyboard first: keys are rare, and a click must not wait behind a
+     * stream of mouse packets either way (each packet takes one poll). */
+    if (kbd_adb_pending() &&
+        !(eg.list_set && !(eg.dev_mask & (1u << kbd_adb_addr())))) {
+        uint8_t k[2];
+        eg.stream = false;
+        reply_hdr(0x00, 0x40, (uint8_t)((kbd_adb_addr() << 4) | 0x0C));
+        kbd_adb_take_r0(k);
+        put_byte(k[0]);
+        put_byte(k[1]);
+        eg.unsolicited = true;
+        eg.unsol_tick = false;
+        eg.unsol_kbd = true;
+        eg.state = EG_ATTN;
+        eg.poll_wait = EG_POLL_CYCLES;
+        schedule(ACT_ATTN);
+        return;
+    }
+#endif
+    if (!mouse_pending())
         return;
     if (eg.list_set && !(eg.dev_mask & (1u << ms.addr)))
         return;
@@ -484,6 +544,7 @@ static void autopoll(int cycles)
     }
     eg.unsolicited = true;
     eg.unsol_tick = false;
+    eg.unsol_kbd = false;
     eg.state = EG_ATTN;
     eg.poll_wait = EG_POLL_CYCLES;
     schedule(ACT_ATTN);

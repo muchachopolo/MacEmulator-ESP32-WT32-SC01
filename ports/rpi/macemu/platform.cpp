@@ -50,6 +50,7 @@ void pi_frame_hook (void)
 	static u64 LastThrottle;
 	u64 Now = CTimer::GetClockTicks64 ();
 	CKernel::Get ()->FlushDisk (FALSE);		// cheap unless the Mac wrote
+	CKernel::Get ()->GetUSBInput ()->Poll ();	// USB keyboard + mouse
 	if (Now - LastThrottle >= ThrottleIntervalUs)
 	{
 		LastThrottle = Now;

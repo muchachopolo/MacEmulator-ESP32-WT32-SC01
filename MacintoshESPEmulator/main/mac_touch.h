@@ -61,6 +61,11 @@ void touch_sampler_start(void);
 /* Emulation loop, once per frame. */
 void touch_consume(touch_report_t *rep);
 
+/* A relative pointing device besides the panel (Raspberry Pi port: USB
+ * mouse): movement in screen pixels and the button state, merged into the
+ * same report as touch gestures. Same context as touch_sample(). */
+void touch_mouse_input(int dx, int dy, bool button);
+
 #ifdef __cplusplus
 }
 #endif
