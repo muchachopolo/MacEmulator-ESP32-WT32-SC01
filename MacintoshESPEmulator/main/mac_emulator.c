@@ -331,6 +331,63 @@ static void full_view_scale(int *dx, int *dy)
 }
 #endif
 
+/* ==== Repaint after a full-screen game quits (MAC_QUIT_REPAINT) ====
+ * Old full-screen games (e.g. from the 1980s) draw over the whole screen
+ * without a window. When one quits under System 7 nothing invalidates the
+ * desktop or the Finder's windows, so the game's last picture stays where
+ * no window happens to be redrawn ("black folders"). When an app listed in
+ * full_screen_apps[] or in game mode executes _ExitToShell, the next time
+ * the Finder calls WaitNextEvent/GetNextEvent the emulator first calls
+ * PaintBehind(WindowList, GrayRgn) and then DrawMenuBar, as a JSR whose
+ * return address is the event trap itself: the trap then runs unchanged.
+ * Entry points come from the toolbox trap table at $0E00 (traps 0-511 on
+ * both ROMs). 0 = never repaint (previous behaviour). */
+#ifndef MAC_QUIT_REPAINT
+#define MAC_QUIT_REPAINT 1
+#endif
+#if MAC_QUIT_REPAINT
+static int qr_stage;            /* 0 idle, 1 PaintBehind due, 2 DrawMenuBar due */
+
+static void qr_aline(unsigned int trap_word)
+{
+    if ((trap_word & 0xFBFF) != 0xA9F4 || !mac_post_boot) return;     /* _ExitToShell */
+    bool game = mac_full_screen_app();
+#if TOUCH_GAME_MODE
+    game = game || game_mode_active();
+#endif
+    if (!game) return;
+    qr_stage = 1;
+    ESP_LOGI(TAG, "QUIT-REPAINT: full-screen app quit, repainting the desktop");
+}
+
+/* From the A-line pre-hook (mac_native.c); 1 = handled (no trap now). */
+int mac_quit_repaint_pre(unsigned int ir)
+{
+    if (!qr_stage || (ir != 0xA860 && ir != 0xA970)) return 0;      /* WNE / GNE */
+    uint8_t *r = mac_mem_get_ram();
+    if (!r) return 0;
+    int al = r[0x0910], fl = r[0x02E0];                                  /* Finder current? */
+    if (!(al == fl && al > 0 && al < 32 && memcmp(r + 0x0911, r + 0x02E1, al) == 0))
+        return 0;
+    if (m68k_get_reg(NULL, M68K_REG_SR) & 0x0700) return 0;
+    uint32_t sp = m68k_get_reg(NULL, M68K_REG_A7);
+    uint32_t ppc = m68k_get_reg(NULL, M68K_REG_PPC);
+    unsigned trap = qr_stage == 1 ? 0x10D : 0x137;                      /* PaintBehind, DrawMenuBar */
+    uint32_t entry = rd32(r, 0x0E00 + trap * 4);
+    if (qr_stage == 1) {
+        sp -= 4; m68k_write_memory_32(sp, rd32(r, 0x09D6));             /* startWindow = WindowList */
+        sp -= 4; m68k_write_memory_32(sp, rd32(r, 0x09EE));             /* clobberedRgn = GrayRgn */
+    }
+    sp -= 4; m68k_write_memory_32(sp, ppc);                             /* return to the event trap */
+    m68k_set_reg(M68K_REG_A7, sp);
+    m68k_set_reg(M68K_REG_PC, entry);
+    qr_stage = qr_stage == 1 ? 2 : 0;
+    return 1;
+}
+#else
+int mac_quit_repaint_pre(unsigned int ir) { (void)ir; return 0; }
+#endif
+
 #if V8GFV
 /* ==== LC II full view for full-screen games (V8_GAME_FULL_VIEW) ====
  * The LC II runs a native 480x320 mode (V8_NATIVE_LCD: the declaration
@@ -801,6 +858,9 @@ void mac_aline_hook(unsigned int trap_word, unsigned int trap_pc)
 #if V8GFV
     v8gfv_aline(trap_word);
 #endif
+#if MAC_QUIT_REPAINT
+    qr_aline(trap_word);
+#endif
     ff_resume_armed = false;            /* the CPU has left the park point */
     if (trap_word != 0xABF7 || !mac_post_boot) return;
     trap_pc &= 0xFFFFFF;
@@ -845,6 +905,9 @@ void mac_aline_hook(unsigned int trap_word, unsigned int trap_pc)
     (void)trap_word; (void)trap_pc;
 #if V8GFV
     v8gfv_aline(trap_word);
+#endif
+#if MAC_QUIT_REPAINT
+    qr_aline(trap_word);
 #endif
 }
 void mac_idle_note_irq(void) {}

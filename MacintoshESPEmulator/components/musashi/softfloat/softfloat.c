@@ -3413,6 +3413,18 @@ floatx80 floatx80_div( floatx80 a, floatx80 b )
 		if ( (bits64) ( bSig<<1 ) ) return propagateFloatx80NaN( a, b );
 		return packFloatx80( zSign, 0, 0 );
 	}
+	/* 68881 unnormals (exponent set, integer bit clear): normalize them
+	   like the FPU does. The division below needs bit 63 set in both
+	   significands; with an unnormal divisor its correction loops run
+	   ~2^60 times (seconds per FDIV). Pseudo-zeros become zeros. */
+	if ( aExp != 0 && ! ( aSig & LIT64( 0x8000000000000000 ) ) ) {
+		if ( aSig == 0 ) aExp = 0;
+		else { int8 sh = countLeadingZeros64( aSig ); aSig <<= sh; aExp -= sh; }
+	}
+	if ( bExp != 0 && ! ( bSig & LIT64( 0x8000000000000000 ) ) ) {
+		if ( bSig == 0 ) bExp = 0;
+		else { int8 sh = countLeadingZeros64( bSig ); bSig <<= sh; bExp -= sh; }
+	}
 	if ( bExp == 0 ) {
 		if ( bSig == 0 ) {
 			if ( ( aExp | aSig ) == 0 ) {

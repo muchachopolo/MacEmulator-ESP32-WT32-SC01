@@ -2473,8 +2473,11 @@ static __attribute__((noinline)) void dc_maybe_patch(void)
 /* is taken. Returns 1 if the instruction was handled (no exception).       */
 /* ======================================================================== */
 #if MAC_NATIVE_DCMP
+extern int mac_quit_repaint_pre(unsigned int ir);   /* mac_emulator.c */
+
 int mac_native_aline_pre(unsigned int ir)
 {
+    if (mac_quit_repaint_pre(ir)) return 1;
     if (ir == DC_TRAP) return dc_trap();
     if (ir == 0xA81F) dc_maybe_patch();
     return 0;
