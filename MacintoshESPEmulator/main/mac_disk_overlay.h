@@ -48,6 +48,11 @@ extern "C" {
  * --disk-rw (whole image) before mac_emu_init(). */
 extern uint32_t disk_ov_pool_kb;
 
+/* Images loaded on demand (Raspberry Pi: big images on the SD card): when
+ * set, called before the overlay reads image bytes [off, off+cnt) so the
+ * platform can load them first. NULL (ESP32, host): the image is complete. */
+extern void (*disk_ov_fill)(uint32_t off, uint32_t cnt);
+
 /* Allocate the overlay for an image.  Returns true when writes are
  * possible (DISK_WRITABLE and the allocation succeeded). */
 bool disk_ov_init(const uint8_t *img, uint32_t size);

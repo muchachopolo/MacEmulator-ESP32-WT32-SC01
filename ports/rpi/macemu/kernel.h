@@ -51,9 +51,11 @@ public:
 private:
 	boolean LoadImages (void);
 	u8 *LoadFile (const char *pName, unsigned *pSize);
+	void OpenOnDemand (const char *pPath, unsigned nSize);
 	void ReadConfig (void);
 	void ShowError (unsigned nCode);
 	static void PanicHandler (void);
+	static void DiskFill (uint32_t nOffset, uint32_t nCount);	// disk_ov_fill
 
 	// do not change this order
 	CActLED			m_ActLED;
@@ -82,6 +84,12 @@ private:
 	unsigned	m_nFlushedWrites;		// disk_ov_write_count() at the last flush
 	u64		m_nLastWriteSeen;		// when that count last changed
 	boolean		m_bMounted;
+	// Big images are loaded on demand in 1 MB chunks (DiskFill); the file
+	// stays open for reading the rest and for saving.
+	boolean		m_bOnDemand;
+	FIL		m_DiskFile;
+	u8		*m_pChunkLoaded;		// one byte per chunk
+	unsigned	m_nChunks;
 
 	static CKernel *s_pThis;
 };

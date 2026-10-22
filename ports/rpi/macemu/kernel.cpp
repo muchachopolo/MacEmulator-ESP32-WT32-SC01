@@ -22,6 +22,10 @@ static const char From[] = "mac";
 #endif
 static const char *const DefaultDisks[] = { "custom_753.dsk", "OS_750_boot.dsk" };
 
+// Disk images larger than this are read from the card on demand, in chunks.
+static const unsigned OnDemandMinSize = 8 * 1024 * 1024;
+static const unsigned ChunkShift = 20;			// 1 MB
+
 // Write-back: flush once the Mac has not written for this long (a file save is
 // a burst of writes), and at most this often while it keeps writing.
 static const u64 FlushQuietUs = 1000000;
@@ -48,7 +52,10 @@ CKernel::CKernel (void)
 	m_nDiskSize (0),
 	m_nFlushedWrites (0),
 	m_nLastWriteSeen (0),
-	m_bMounted (FALSE)
+	m_bMounted (FALSE),
+	m_bOnDemand (FALSE),
+	m_pChunkLoaded (0),
+	m_nChunks (0)
 {
 	s_pThis = this;
 	m_DiskName[0] = 0;
@@ -177,6 +184,69 @@ void CKernel::ReadConfig (void)
 	free (pText);
 }
 
+void CKernel::OpenOnDemand (const char *pPath, unsigned nSize)
+{
+	if (f_open (&m_DiskFile, pPath, FA_READ | FA_WRITE | FA_OPEN_EXISTING) != FR_OK)
+	{
+		m_Logger.Write (From, LogError, "%s: cannot open", pPath);
+		return;
+	}
+	m_nChunks = (nSize + (1u << ChunkShift) - 1) >> ChunkShift;
+	m_pDisk = (u8 *) malloc (nSize);
+	m_pChunkLoaded = (u8 *) calloc (m_nChunks, 1);
+	if (!m_pDisk || !m_pChunkLoaded)
+	{
+		free (m_pDisk);
+		free (m_pChunkLoaded);
+		m_pDisk = 0;
+		m_pChunkLoaded = 0;
+		f_close (&m_DiskFile);
+		m_Logger.Write (From, LogError, "%s: no memory for %u bytes", pPath, nSize);
+		return;
+	}
+	m_nDiskSize = nSize;
+	m_bOnDemand = TRUE;
+	disk_ov_fill = DiskFill;
+	DiskFill (0, 1);				// boot blocks + MDB (logged by the core)
+	m_Logger.Write (From, LogNotice, "%s: %u bytes, loaded on demand", pPath, nSize);
+}
+
+void CKernel::DiskFill (uint32_t nOffset, uint32_t nCount)
+{
+	CKernel *pThis = s_pThis;
+	if (!nCount || nOffset >= pThis->m_nDiskSize)
+	{
+		return;
+	}
+	unsigned nLast = (nOffset + nCount - 1) >> ChunkShift;
+	for (unsigned c = nOffset >> ChunkShift; c <= nLast && c < pThis->m_nChunks; c++)
+	{
+		if (pThis->m_pChunkLoaded[c])
+		{
+			continue;
+		}
+		pThis->m_pChunkLoaded[c] = 1;		// don't retry a failing chunk
+		unsigned nPos = c << ChunkShift;
+		unsigned n = pThis->m_nDiskSize - nPos < (1u << ChunkShift)
+			     ? pThis->m_nDiskSize - nPos : 1u << ChunkShift;
+		UINT nRead = 0;
+		u64 nStart = CTimer::GetClockTicks64 ();
+		if (   f_lseek (&pThis->m_DiskFile, nPos) != FR_OK
+		    || f_read (&pThis->m_DiskFile, pThis->m_pDisk + nPos, n, &nRead) != FR_OK
+		    || nRead != n)
+		{
+			pThis->m_Logger.Write (From, LogError, "disk read failed at %u", nPos);
+		}
+		static unsigned s_nLogged;
+		if (s_nLogged < 40)
+		{
+			s_nLogged++;
+			pThis->m_Logger.Write (From, LogNotice, "disk chunk %u loaded in %u ms", c,
+					       (unsigned) ((CTimer::GetClockTicks64 () - nStart) / 1000));
+		}
+	}
+}
+
 boolean CKernel::LoadImages (void)
 {
 	if (f_mount (&m_FileSystem, DRIVE, 1) != FR_OK)
@@ -199,6 +269,8 @@ boolean CKernel::LoadImages (void)
 	mac_ext_rom_size = nROMSize;
 
 	ReadConfig ();
+	m_Logger.Write (From, LogNotice, "disk setting: \"%s\"", m_DiskName);
+	m_LogFile.Save (TRUE);
 	for (unsigned i = 0; !m_pDisk && i <= sizeof DefaultDisks / sizeof DefaultDisks[0]; i++)
 	{
 		if (i > 0)
@@ -209,7 +281,15 @@ boolean CKernel::LoadImages (void)
 		{
 			CString Path;
 			Path.Format (MAC_DIR "%s", m_DiskName);
-			m_pDisk = LoadFile (Path, &m_nDiskSize);
+			FILINFO Info;
+			if (f_stat (Path, &Info) == FR_OK && Info.fsize > OnDemandMinSize)
+			{
+				OpenOnDemand (Path, (unsigned) Info.fsize);
+			}
+			else
+			{
+				m_pDisk = LoadFile (Path, &m_nDiskSize);
+			}
 		}
 	}
 	if (!m_pDisk)
@@ -259,11 +339,16 @@ void CKernel::FlushDisk (boolean bForce)
 	CString Path;
 	Path.Format (MAC_DIR "%s", m_DiskName);
 	FIL File;
-	if (f_open (&File, Path, FA_WRITE | FA_OPEN_EXISTING) != FR_OK)
+	FIL *pFile = &m_DiskFile;
+	if (!m_bOnDemand)
 	{
-		m_Logger.Write (From, LogError, "%s: cannot open for writing", (const char *) Path);
-		m_nFlushedWrites = nWrites;			// don't retry every frame
-		return;
+		pFile = &File;
+		if (f_open (&File, Path, FA_WRITE | FA_OPEN_EXISTING) != FR_OK)
+		{
+			m_Logger.Write (From, LogError, "%s: cannot open for writing", (const char *) Path);
+			m_nFlushedWrites = nWrites;		// don't retry every frame
+			return;
+		}
 	}
 	unsigned nBlocks = 0;
 	u8 Block[DISK_OV_BLOCK];
@@ -278,8 +363,8 @@ void CKernel::FlushDisk (boolean bForce)
 			continue;
 		}
 		UINT nWritten = 0;
-		if (f_lseek (&File, nOffset) != FR_OK
-		    || f_write (&File, Block, nLen, &nWritten) != FR_OK || nWritten != nLen)
+		if (f_lseek (pFile, nOffset) != FR_OK
+		    || f_write (pFile, Block, nLen, &nWritten) != FR_OK || nWritten != nLen)
 		{
 			m_Logger.Write (From, LogError, "%s: write failed at %u", (const char *) Path, nOffset);
 			break;
@@ -287,7 +372,14 @@ void CKernel::FlushDisk (boolean bForce)
 		memcpy (m_pDisk + nOffset, Block, nLen);	// the file now holds it
 		nBlocks++;
 	}
-	f_close (&File);
+	if (m_bOnDemand)
+	{
+		f_sync (pFile);
+	}
+	else
+	{
+		f_close (&File);
+	}
 	m_nFlushedWrites = nWrites;
 	s_nSeen = nWrites;
 	m_Logger.Write (From, LogNotice, "%s: saved %u blocks", (const char *) Path, nBlocks);
@@ -296,7 +388,8 @@ void CKernel::FlushDisk (boolean bForce)
 TShutdownMode CKernel::Run (void)
 {
 	m_Logger.Write (From, LogNotice, "Mac emulator, compiled " __DATE__ " " __TIME__);
-	m_Logger.Write (From, LogNotice, "ARM clock %u MHz", m_CPUThrottle.GetClockRate () / 1000000);
+	m_Logger.Write (From, LogNotice, "ARM clock %u MHz, memory %u MB", m_CPUThrottle.GetClockRate () / 1000000,
+			(unsigned) (CMemorySystem::Get ()->GetMemSize () >> 20));
 
 	display_init ();
 	if (!LoadImages ())

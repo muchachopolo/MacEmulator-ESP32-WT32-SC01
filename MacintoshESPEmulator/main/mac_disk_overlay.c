@@ -27,6 +27,8 @@ static uint32_t st_writes, st_wblocks, st_same, st_full;
 static int64_t  st_last_log;
 static uint32_t st_last_used = ~0u;
 
+void (*disk_ov_fill)(uint32_t off, uint32_t cnt);
+
 bool disk_ov_active(void) { return active; }
 
 uint32_t disk_ov_write_count(void) { return st_writes; }
@@ -78,6 +80,7 @@ static inline const uint8_t *block_src(uint32_t blk)
 
 void disk_ov_read(uint8_t *dst, uint32_t off, uint32_t cnt)
 {
+    if (disk_ov_fill) disk_ov_fill(off, cnt);
     if (!active || used == 0) {             /* nothing written yet */
         memcpy(dst, img + off, cnt);
         return;
@@ -94,6 +97,7 @@ void disk_ov_read(uint8_t *dst, uint32_t off, uint32_t cnt)
 
 uint8_t disk_ov_byte(uint32_t off)
 {
+    if (disk_ov_fill) disk_ov_fill(off, 1);
     if (!active || used == 0) return img[off];
     return block_src(off / DISK_OV_BLOCK)[off % DISK_OV_BLOCK];
 }
@@ -112,6 +116,12 @@ int disk_ov_write(const uint8_t *src, uint32_t off, uint32_t cnt)
 {
     if (!active) return DISK_OV_DSKFUL;
     st_writes++;
+    if (disk_ov_fill) {         /* whole blocks: pass 2 copies partial ones */
+        uint32_t b0 = off / DISK_OV_BLOCK * DISK_OV_BLOCK;
+        uint32_t b1 = (off + cnt + DISK_OV_BLOCK - 1) / DISK_OV_BLOCK * DISK_OV_BLOCK;
+        if (b1 > img_size) b1 = img_size;
+        disk_ov_fill(b0, b1 - b0);
+    }
 
     /* Pass 1: count the new slots this request needs (all or nothing). */
     uint32_t need = 0;
