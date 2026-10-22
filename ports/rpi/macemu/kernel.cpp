@@ -267,8 +267,20 @@ void CKernel::DiskFill (uint32_t nOffset, uint32_t nCount)
 		}
 		else if (bLog)
 		{
-			pThis->m_Logger.Write (From, LogNotice, "disk chunk %u loaded in %u ms", c,
-					       (unsigned) ((CTimer::GetClockTicks64 () - nStart) / 1000));
+			// CRC-32 (zlib) of the loaded chunk, to compare with the file on a PC
+			u32 nCRC = 0xFFFFFFFF;
+			const u8 *p = pThis->m_pDisk + nPos;
+			for (unsigned i = 0; i < n; i++)
+			{
+				nCRC ^= p[i];
+				for (unsigned k = 0; k < 8; k++)
+				{
+					nCRC = (nCRC >> 1) ^ (0xEDB88320 & (0 - (nCRC & 1)));
+				}
+			}
+			pThis->m_Logger.Write (From, LogNotice, "disk chunk %u loaded in %u ms, crc %08X", c,
+					       (unsigned) ((CTimer::GetClockTicks64 () - nStart) / 1000),
+					       nCRC ^ 0xFFFFFFFF);
 		}
 	}
 }
