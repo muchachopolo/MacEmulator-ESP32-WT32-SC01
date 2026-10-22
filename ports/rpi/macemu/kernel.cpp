@@ -36,6 +36,32 @@ enum { ErrorSDCard = 1, ErrorROM = 2, ErrorInit = 3 };
 
 CKernel *CKernel::s_pThis = 0;
 
+// Large f_read()s straight into heap buffers sometimes never return in
+// Circle's SD (SDHOST) driver; reads in 64 KB pieces through a static buffer
+// have been reliable. Every file read goes through here.
+static u8 s_Bounce[0x10000] __attribute__ ((aligned (64)));
+
+static FRESULT ReadPieces (FIL *pFile, u8 *pDest, unsigned nCount)
+{
+	for (unsigned nDone = 0; nDone < nCount; )
+	{
+		unsigned nPiece = nCount - nDone < sizeof s_Bounce ? nCount - nDone : sizeof s_Bounce;
+		UINT nGot = 0;
+		FRESULT Res = f_read (pFile, s_Bounce, nPiece, &nGot);
+		if (Res != FR_OK)
+		{
+			return Res;
+		}
+		if (nGot != nPiece)
+		{
+			return FR_INT_ERR;
+		}
+		memcpy (pDest + nDone, s_Bounce, nPiece);
+		nDone += nPiece;
+	}
+	return FR_OK;
+}
+
 CKernel::CKernel (void)
 :	m_Screen (m_Options.GetWidth (), m_Options.GetHeight ()),
 	m_Timer (&m_Interrupt),
@@ -126,8 +152,7 @@ u8 *CKernel::LoadFile (const char *pName, unsigned *pSize)
 	for (unsigned nDone = 0; nDone < nSize; )
 	{
 		unsigned n = nSize - nDone < nChunk ? nSize - nDone : nChunk;
-		UINT nRead = 0;
-		if (f_read (&File, pBuffer + nDone, n, &nRead) != FR_OK || nRead != n)
+		if (ReadPieces (&File, pBuffer + nDone, n) != FR_OK)
 		{
 			free (pBuffer);
 			f_close (&File);
@@ -240,25 +265,8 @@ void CKernel::DiskFill (uint32_t nOffset, uint32_t nCount)
 		FRESULT Res = f_lseek (&pThis->m_DiskFile, nPos);
 		if (Res == FR_OK)
 		{
-			// 64 KB pieces through a static bounce buffer: a 1 MB read straight
-			// into the big buffer hung in the SD driver while the Mac ran.
-			static u8 Bounce[0x10000] __attribute__ ((aligned (64)));
-			for (unsigned nDone = 0; Res == FR_OK && nDone < n; )
-			{
-				unsigned nPiece = n - nDone < sizeof Bounce ? n - nDone : sizeof Bounce;
-				UINT nGot = 0;
-				Res = f_read (&pThis->m_DiskFile, Bounce, nPiece, &nGot);
-				if (Res == FR_OK && nGot != nPiece)
-				{
-					Res = FR_INT_ERR;
-				}
-				if (Res == FR_OK)
-				{
-					memcpy (pThis->m_pDisk + nPos + nDone, Bounce, nPiece);
-					nDone += nPiece;
-					nRead = nDone;
-				}
-			}
+			Res = ReadPieces (&pThis->m_DiskFile, pThis->m_pDisk + nPos, n);
+			nRead = Res == FR_OK ? n : 0;
 		}
 		if (Res != FR_OK || nRead != n)
 		{
