@@ -100,13 +100,45 @@ u8 *CKernel::LoadFile (const char *pName, unsigned *pSize)
 	}
 	unsigned nSize = f_size (&File);
 	u8 *pBuffer = (u8 *) malloc (nSize ? nSize : 1);
-	UINT nRead = 0;
-	if (!pBuffer || f_read (&File, pBuffer, nSize, &nRead) != FR_OK || nRead != nSize)
+	if (!pBuffer)
 	{
-		free (pBuffer);
 		f_close (&File);
-		m_Logger.Write (From, LogError, "%s: read failed", pName);
+		m_Logger.Write (From, LogError, "%s: no memory for %u bytes", pName, nSize);
 		return 0;
+	}
+	// Read in 1 MB pieces; files over 4 MB (big disk images) get a progress
+	// bar, since 500 MB take a while to load from the card.
+	const unsigned nChunk = 0x100000;
+	const unsigned W = CILI9486::Width, H = CILI9486::Height;
+	boolean bBar = nSize > 4 * nChunk;
+	if (bBar)
+	{
+		m_LCD.Fill (40, H / 2 - 12, W - 80, 24, 0x8410);	// grey frame
+	}
+	u64 nStart = CTimer::GetClockTicks64 ();
+	for (unsigned nDone = 0; nDone < nSize; )
+	{
+		unsigned n = nSize - nDone < nChunk ? nSize - nDone : nChunk;
+		UINT nRead = 0;
+		if (f_read (&File, pBuffer + nDone, n, &nRead) != FR_OK || nRead != n)
+		{
+			free (pBuffer);
+			f_close (&File);
+			m_Logger.Write (From, LogError, "%s: read failed at %u", pName, nDone);
+			return 0;
+		}
+		nDone += n;
+		if (bBar)
+		{
+			unsigned nWidth = (unsigned) ((u64) (W - 84) * nDone / nSize);
+			m_LCD.Fill (42, H / 2 - 10, nWidth, 20, 0x07E0);	// green
+		}
+	}
+	if (bBar)
+	{
+		unsigned nMs = (unsigned) ((CTimer::GetClockTicks64 () - nStart) / 1000);
+		m_Logger.Write (From, LogNotice, "%s: loaded in %u ms", pName, nMs);
+		m_LCD.Fill (0, 0, W, H, 0);
 	}
 	f_close (&File);
 	*pSize = nSize;
@@ -235,8 +267,10 @@ void CKernel::FlushDisk (boolean bForce)
 	}
 	unsigned nBlocks = 0;
 	u8 Block[DISK_OV_BLOCK];
-	for (unsigned nOffset = 0; nOffset < m_nDiskSize; nOffset += DISK_OV_BLOCK)
+	for (int32_t nBlock = disk_ov_next_written (0); nBlock >= 0;
+	     nBlock = disk_ov_next_written (nBlock + 1))
 	{
+		unsigned nOffset = (unsigned) nBlock * DISK_OV_BLOCK;
 		unsigned nLen = m_nDiskSize - nOffset < DISK_OV_BLOCK ? m_nDiskSize - nOffset : DISK_OV_BLOCK;
 		disk_ov_read (Block, nOffset, nLen);
 		if (memcmp (Block, m_pDisk + nOffset, nLen) == 0)

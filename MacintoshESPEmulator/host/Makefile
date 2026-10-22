@@ -54,7 +54,7 @@ SHIMS := $(wildcard shim/*.h shim/freertos/*.h)
 all: $(BUILD)/macemu
 
 $(BUILD)/macemu: $(OBJS)
-	$(CC) $(ARCH) -o $@ $^ -lm
+	$(CC) $(ARCH) $(OPT) -o $@ $^ -lm
 
 $(BUILD)/main/%.o: $(ROOT)/main/%.c $(wildcard $(ROOT)/main/*.h) $(SHIMS) Makefile
 	@mkdir -p $(dir $@)

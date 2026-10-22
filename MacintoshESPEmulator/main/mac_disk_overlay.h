@@ -75,6 +75,10 @@ int disk_ov_xfer(bool write, uint8_t *rambuf, uint32_t off, uint32_t cnt);
  * e.g. the Raspberry Pi port's write-back to the SD card). */
 uint32_t disk_ov_write_count(void);
 
+/* First block >= from that has been written (holds an overlay slot), or
+ * -1 if none: lets a platform write back only the changed blocks. */
+int32_t disk_ov_next_written(uint32_t from);
+
 /* Log usage (blocks used / pool, writes, full errors) */
 void disk_ov_log_stats(const char *why);
 
