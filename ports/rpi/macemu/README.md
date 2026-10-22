@@ -42,8 +42,10 @@ missing, 3 = emulator init failed.
 ## Build
 
 Circle must be built with a larger kernel limit (the emulator's static tables)
-and multi-core support: add `DEFINE += -DKERNEL_MAX_SIZE=0x1000000` and
-`DEFINE += -DARM_ALLOW_MULTI_CORE` to `~/tools/circle/Config.mk`,
+and multi-core support, using the EMMC SD driver (the default SDHOST driver
+hung on reads while USB devices were active): add
+`DEFINE += -DKERNEL_MAX_SIZE=0x1000000`, `DEFINE += -DARM_ALLOW_MULTI_CORE` and
+`DEFINE += -DNO_SDHOST` to `~/tools/circle/Config.mk`,
 rebuild Circle (`./makeall clean && ./makeall --nosample`) and build the
 `addon/SDCard` and `addon/fatfs` libraries (`make` in each).
 
