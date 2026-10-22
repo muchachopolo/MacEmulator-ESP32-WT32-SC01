@@ -34,6 +34,7 @@ static long  opt_shot_every = 300;    /* 0 = no screenshots */
 static const char *opt_dump_ram = NULL;
 static const char *opt_disk_rw = NULL;   /* --disk-rw FILE */
 static const char *opt_disk_out = NULL;  /* --disk-out FILE */
+static const char *opt_disk2_out = NULL; /* --disk2-out FILE (LC II, --disk2) */
 static const char *opt_out = "out";
 static int   opt_cpu = 0;             /* 0 = keep what mac_emu_init() chose */
 static long  frames = 0;
@@ -402,6 +403,16 @@ static void at_exit(void)
         if (f) fclose(f);
         free(img);
     }
+#if MAC_ROM_LC_II
+    if (opt_disk2_out && host_d2) {
+        FILE *f = fopen(opt_disk2_out, "wb");
+        if (f && fwrite(host_d2, 1, host_d2_size, f) == host_d2_size)
+            fprintf(stderr, "H host: wrote %u-byte disk 2 image to %s\n", (unsigned)host_d2_size, opt_disk2_out);
+        else
+            perror(opt_disk2_out);
+        if (f) fclose(f);
+    }
+#endif
     if (host_log_file) fflush(host_log_file);
 }
 
@@ -449,6 +460,7 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--dump-ram") && v)   { opt_dump_ram = v; i++; }
         else if (!strcmp(a, "--disk-rw") && v)    { opt_disk_rw = v; i++; }
         else if (!strcmp(a, "--disk-out") && v)   { opt_disk_out = v; i++; }
+        else if (!strcmp(a, "--disk2-out") && v)  { opt_disk2_out = v; i++; }
         else if (!strcmp(a, "--cpu") && v)       { opt_cpu = atoi(v); i++; }
         else if (!strcmp(a, "--vclock") && v)    { opt_vclock = atol(v); host_vclock_us = 0; i++; }
         else if (!strcmp(a, "--swipe") && v) {
