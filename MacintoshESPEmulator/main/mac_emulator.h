@@ -142,6 +142,20 @@ extern "C" {
 #define MAC_SCREEN_BASE     (MAC_RAM_SIZE - 0x5900)  /* 2MB: 0x1FA700 */
 #define MAC_SOUND_BASE      (MAC_RAM_SIZE - 0x0300)  /* 2MB: 0x1FFD00 */
 
+/* ROM and disk supplied by the platform at run time instead of linked-in
+ * _binary_* symbols (Raspberry Pi port: loaded from the SD card). Set the
+ * pointers and sizes before mac_emu_init(); with no disk (NULL) the Mac shows
+ * the "?" floppy. 0 = the embedded images, as before. */
+#ifndef MAC_EXTERNAL_IMAGES
+#define MAC_EXTERNAL_IMAGES 0
+#endif
+#if MAC_EXTERNAL_IMAGES
+extern const uint8_t *mac_ext_rom;
+extern uint32_t mac_ext_rom_size;
+extern uint8_t *mac_ext_disk;
+extern uint32_t mac_ext_disk_size;
+#endif
+
 /* Initialize the emulator (loads ROM, allocates RAM) */
 bool mac_emu_init(void);
 

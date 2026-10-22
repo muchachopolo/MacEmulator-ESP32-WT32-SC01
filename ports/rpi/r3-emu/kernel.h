@@ -13,6 +13,8 @@
 #include <circle/cputhrottle.h>
 #include <circle/spimaster.h>
 #include <circle/types.h>
+#include <SDCard/emmc.h>
+#include <fatfs/ff.h>
 #include "ili9486.h"
 #include "xpt2046.h"
 
@@ -37,7 +39,16 @@ public:
 	CXPT2046 *GetTouch (void) { return &m_Touch; }
 	CCPUThrottle *GetCPUThrottle (void) { return &m_CPUThrottle; }
 
+	// Write the blocks the Mac changed back to the disk image file.
+	// bForce: also when the last write is recent (restart, shutdown).
+	void FlushDisk (boolean bForce);
+
 private:
+	boolean LoadImages (void);
+	u8 *LoadFile (const char *pName, unsigned *pSize);
+	void ReadConfig (void);
+	void ShowError (unsigned nCode);
+
 	// do not change this order
 	CActLED			m_ActLED;
 	CKernelOptions		m_Options;
@@ -52,6 +63,14 @@ private:
 	CSPIMaster		m_SPI;
 	CILI9486		m_LCD;
 	CXPT2046		m_Touch;
+	CEMMCDevice		m_EMMC;
+	FATFS			m_FileSystem;
+
+	char		m_DiskName[64];			// /mac/config.txt "disk="
+	u8		*m_pDisk;			// pristine copy = what the file holds
+	unsigned	m_nDiskSize;
+	unsigned	m_nFlushedWrites;		// disk_ov_write_count() at the last flush
+	u64		m_nLastWriteSeen;		// when that count last changed
 
 	static CKernel *s_pThis;
 };

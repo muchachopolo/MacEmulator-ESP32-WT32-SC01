@@ -40,7 +40,8 @@ void pi_log (int level, const char *tag, const char *fmt, ...)
 
 void pi_restart (void)
 {
-	CKernel::Get ()->GetLogger ()->Write ("r3", LogNotice, "Mac restart -> reboot");
+	CKernel::Get ()->FlushDisk (TRUE);
+	CKernel::Get ()->GetLogger ()->Write ("mac", LogNotice, "Mac restart -> reboot");
 	CTimer::SimpleMsDelay (200);
 	reboot ();
 }
@@ -58,6 +59,7 @@ void pi_frame_hook (void)
 			mac_video_render (pRAM, mac_mem_get_ram_size ());
 		}
 	}
+	CKernel::Get ()->FlushDisk (FALSE);		// cheap unless the Mac wrote
 	if (Now - LastThrottle >= ThrottleIntervalUs)
 	{
 		LastThrottle = Now;

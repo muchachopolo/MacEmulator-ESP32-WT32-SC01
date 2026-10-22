@@ -29,6 +29,8 @@ static uint32_t st_last_used = ~0u;
 
 bool disk_ov_active(void) { return active; }
 
+uint32_t disk_ov_write_count(void) { return st_writes; }
+
 bool disk_ov_init(const uint8_t *image, uint32_t size)
 {
     img = image;

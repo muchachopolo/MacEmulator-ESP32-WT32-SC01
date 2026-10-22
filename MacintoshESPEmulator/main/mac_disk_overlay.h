@@ -71,6 +71,10 @@ int disk_ov_write(const uint8_t *src, uint32_t off, uint32_t cnt);
  * into the buffer for writes too; DISK_WRITABLE=0 keeps that). */
 int disk_ov_xfer(bool write, uint8_t *rambuf, uint32_t off, uint32_t cnt);
 
+/* Number of write requests so far (lets a platform notice changes cheaply,
+ * e.g. the Raspberry Pi port's write-back to the SD card). */
+uint32_t disk_ov_write_count(void);
+
 /* Log usage (blocks used / pool, writes, full errors) */
 void disk_ov_log_stats(const char *why);
 

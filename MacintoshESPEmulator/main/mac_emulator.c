@@ -31,8 +31,20 @@
 
 static const char *TAG = "mac_emu";
 
+/* ROM and disk images. MAC_EXTERNAL_IMAGES (mac_emulator.h): the platform
+ * loads them at run time (Raspberry Pi: from the SD card) and sets
+ * mac_ext_rom/mac_ext_disk before mac_emu_init(). */
+#if MAC_EXTERNAL_IMAGES
+const uint8_t *mac_ext_rom;
+uint32_t mac_ext_rom_size;
+uint8_t *mac_ext_disk;
+uint32_t mac_ext_disk_size;
+#define rom_start  mac_ext_rom
+#define rom_end    (mac_ext_rom + mac_ext_rom_size)
+#define disk_start mac_ext_disk
+#define disk_end   (mac_ext_disk + mac_ext_disk_size)
 /* Embedded ROM image (linked from flash via CMake EMBED_FILES) */
-#if MAC_ROM_LC_II && MAC_V8_CUDA
+#elif MAC_ROM_LC_II && MAC_V8_CUDA
 extern const uint8_t rom_start[] asm("_binary_Color_Classic_ROM_start");
 extern const uint8_t rom_end[]   asm("_binary_Color_Classic_ROM_end");
 #elif MAC_ROM_LC_II
@@ -44,7 +56,7 @@ extern const uint8_t rom_end[]   asm("_binary_Classic_ROM_end");
 #endif
 
 /* Disk image - only available if HAS_DISK_IMAGE is set in CMakeLists.txt */
-#if HAS_DISK_IMAGE
+#if HAS_DISK_IMAGE && !MAC_EXTERNAL_IMAGES
 /* DISK_SYM = C identifier of the embedded file name (CMake/Makefile
  * DISK_NAME, e.g. OS_750_boot_dsk or custom_753_dsk). */
 #ifndef DISK_SYM
