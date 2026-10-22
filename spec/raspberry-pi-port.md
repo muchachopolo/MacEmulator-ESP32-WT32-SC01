@@ -164,6 +164,18 @@ Higher SPI clocks are often possible on these shields — measure.
       no longer stall the 68k.
 - [ ] **R8. Docs**: `docs/learn/08-raspberry-pi-port.md` + build/flash guide.
 
+## 5b. Status at the end of 2026-10-21
+
+Done since R3: R5 (SD storage, write-back), R6 (LC II kernel, 8 MB RAM), R7 start
+(core 1 renders + touch, turbo boot until the Finder), R4 built (USB keyboard/mouse,
+`MAC_KEYBOARD`), log to `SD:/mac/log.txt` + freeze indicator, big disks on demand
+(`disk_ov_fill`), second disk (`MAC_DRIVE2`, `disk2=`), `tools/split_disk.py`.
+Lessons: the user's "2 GB" card really stores ~128 MB; large direct `f_read()`s
+into heap buffers hang in Circle's SDHOST driver (all reads go through a 64 KB
+bounce buffer). **Open:** black screen after reformatting the card (FAT32) with
+`system753.dsk` + `games_2.dsk`; next: read `log.txt`, verify every card file,
+try `disk=custom_753.dsk` alone, check FAT32 vs the previous FAT16 layout.
+
 ## 6. Risks
 
 - Shield variants differ (controller, SPI word format, max clock) — R1 settles it.
