@@ -230,17 +230,43 @@ void CKernel::DiskFill (uint32_t nOffset, uint32_t nCount)
 		unsigned n = pThis->m_nDiskSize - nPos < (1u << ChunkShift)
 			     ? pThis->m_nDiskSize - nPos : 1u << ChunkShift;
 		UINT nRead = 0;
-		u64 nStart = CTimer::GetClockTicks64 ();
-		if (   f_lseek (&pThis->m_DiskFile, nPos) != FR_OK
-		    || f_read (&pThis->m_DiskFile, pThis->m_pDisk + nPos, n, &nRead) != FR_OK
-		    || nRead != n)
-		{
-			pThis->m_Logger.Write (From, LogError, "disk read failed at %u", nPos);
-		}
 		static unsigned s_nLogged;
-		if (s_nLogged < 40)
+		boolean bLog = s_nLogged < 20;
+		if (bLog)
 		{
 			s_nLogged++;
+		}
+		u64 nStart = CTimer::GetClockTicks64 ();
+		FRESULT Res = f_lseek (&pThis->m_DiskFile, nPos);
+		if (Res == FR_OK)
+		{
+			// 64 KB pieces through a static bounce buffer: a 1 MB read straight
+			// into the big buffer hung in the SD driver while the Mac ran.
+			static u8 Bounce[0x10000] __attribute__ ((aligned (64)));
+			for (unsigned nDone = 0; Res == FR_OK && nDone < n; )
+			{
+				unsigned nPiece = n - nDone < sizeof Bounce ? n - nDone : sizeof Bounce;
+				UINT nGot = 0;
+				Res = f_read (&pThis->m_DiskFile, Bounce, nPiece, &nGot);
+				if (Res == FR_OK && nGot != nPiece)
+				{
+					Res = FR_INT_ERR;
+				}
+				if (Res == FR_OK)
+				{
+					memcpy (pThis->m_pDisk + nPos + nDone, Bounce, nPiece);
+					nDone += nPiece;
+					nRead = nDone;
+				}
+			}
+		}
+		if (Res != FR_OK || nRead != n)
+		{
+			pThis->m_Logger.Write (From, LogError, "disk read failed at %u (FatFs %d, %u bytes)",
+					       nPos, Res, nRead);
+		}
+		else if (bLog)
+		{
 			pThis->m_Logger.Write (From, LogNotice, "disk chunk %u loaded in %u ms", c,
 					       (unsigned) ((CTimer::GetClockTicks64 () - nStart) / 1000));
 		}
