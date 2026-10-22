@@ -9,6 +9,10 @@ fit the storage at hand).
       --drop "Desktop Folder:Games" --drop "Desktop Folder:Applications" \
       --size 48M
 
+  # ... optionally with extensions/control panels moved to the "(Disabled)"
+  # folders, as Extensions Manager does (they can be re-enabled there):
+  #   --disable "Extensions:Eyeballs" --disable "Control Panels:After Dark 2.0"
+
   # data disks: the items of one folder, biggest first, packed into as many
   # images of --size as needed (OUT_1.dsk, OUT_2.dsk, ...)
   python3 tools/split_disk.py pack BIG.DSK OUT.dsk --name "Games" \
@@ -33,6 +37,9 @@ def main():
     ap.add_argument('--name', required=True, help='volume name (packs get " 1", " 2", ...)')
     ap.add_argument('--size', default='48M', help='image size, e.g. 48M')
     ap.add_argument('--drop', action='append', default=[], help='system: path to leave out')
+    ap.add_argument('--disable', action='append', default=[],
+                    help='system: "Extensions:NAME" or "Control Panels:NAME" (System Folder) '
+                         'to move into the matching "(Disabled)" folder')
     ap.add_argument('--from', dest='src_folder', help='pack: folder whose items are packed')
     ap.add_argument('--max-disks', type=int, default=0, help='pack: stop after N images')
     ap.add_argument('--pylib', help='extra sys.path entry holding machfs/macresources')
@@ -67,6 +74,18 @@ def main():
         for p in a.drop:
             bd.del_path(vol, tuple(p.split(':')))
             print(f'  dropped {p}')
+        sf = vol['System Folder']
+        for p in a.disable:
+            folder, name = p.split(':', 1)
+            if folder not in sf or name not in sf[folder]:
+                print(f'  not found: {p}')
+                continue
+            dis = folder + ' (Disabled)'
+            if dis not in sf:
+                sf[dis] = machfs.Folder()
+            sf[dis][name] = sf[folder][name]
+            del sf[folder][name]
+            print(f'  disabled {p}')
         write(vol, a.out, True)
         return
 
