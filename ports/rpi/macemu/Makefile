@@ -45,7 +45,7 @@ OBJS	= $(addprefix $(O)/,$(PI_SRCS:.cpp=.o)) $(O)/syscalls.o \
 # inline touch polling, no FreeRTOS); the Pi keeps the real-time throttle and
 # supplies the ROM and disk at run time (MAC_EXTERNAL_IMAGES) and a USB keyboard
 # (MAC_KEYBOARD).
-EMU_DEFS = -DHOST_BUILD=1 -DMAC_FRAME_THROTTLE=1 -DMAC_EXTERNAL_IMAGES=1 -DHAS_DISK_IMAGE=1 \
+EMU_DEFS = -DHOST_BUILD=1 -DMAC_FRAME_THROTTLE=1 -DMAC_BOOT_TURBO=1 -DMAC_EXTERNAL_IMAGES=1 -DHAS_DISK_IMAGE=1 \
 	   -DMAC_KEYBOARD=1 $(if $(MAC_RAM_SIZE),-DMAC_RAM_SIZE=$(MAC_RAM_SIZE),) \
 	   -DMAC_ROM_LC_II=$(MAC_ROM_LC_II) -DMAC_V8_CUDA=0 $(EXTRA_DEFS)
 

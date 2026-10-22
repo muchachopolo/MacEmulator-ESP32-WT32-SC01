@@ -4041,6 +4041,28 @@ void mac_emu_run(void *param)
         {
             static int64_t thr_base;
             static int64_t thr_frames;
+#if MAC_BOOT_TURBO
+            /* Uncapped until the Finder has been in front for 2 s (or 30000
+             * frames at most): the boot runs as fast as the host allows. */
+            static int turbo_left = 30000, finder_frames;
+            if (turbo_left > 0) {
+                uint8_t *r = mac_mem_get_ram();
+                uint32_t wmgr = r ? rd32(r, 0x09DE) : 0;
+                int al = r ? r[0x0910] : 0, fl = r ? r[0x02E0] : 0;
+                bool finder = r && mac_post_boot && wmgr != 0 && wmgr != 0xFFFFFFFF &&
+                              al == fl && al > 0 && al < 32 &&
+                              memcmp(r + 0x0911, r + 0x02E1, al) == 0;
+                finder_frames = finder ? finder_frames + 1 : 0;
+                if (--turbo_left == 0 || finder_frames >= 120) {
+                    turbo_left = 0;
+                    ESP_LOGI(TAG, "BOOT-TURBO: off at frame %d (%lld ms)", frame_count,
+                             (long long)(esp_timer_get_time() / 1000));
+                }
+                thr_base = 0;                   /* restart the cap afterwards */
+                thr_frames = 0;
+            } else
+#endif
+            {
             int64_t now = esp_timer_get_time();
             if (thr_base == 0) thr_base = now;
             thr_frames++;
@@ -4051,6 +4073,7 @@ void mac_emu_run(void *param)
             } else if (now - target > 100000) {
                 thr_base = now;
                 thr_frames = 0;
+            }
             }
         }
 #endif

@@ -138,6 +138,13 @@ extern "C" {
 #endif
 #define MAC_FRAME_US        16626       /* 60.15 Hz */
 
+/* MAC_BOOT_TURBO: no real-time cap until the Finder is up (Raspberry Pi
+ * port, where the CPU is several times faster than the Mac). 0 = capped
+ * from the start, as before. */
+#ifndef MAC_BOOT_TURBO
+#define MAC_BOOT_TURBO      0
+#endif
+
 /* Screen buffer is at the top of RAM */
 #define MAC_SCREEN_BASE     (MAC_RAM_SIZE - 0x5900)  /* 2MB: 0x1FA700 */
 #define MAC_SOUND_BASE      (MAC_RAM_SIZE - 0x0300)  /* 2MB: 0x1FFD00 */

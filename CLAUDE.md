@@ -216,6 +216,7 @@ Details: `docs/display-pipeline.md#touch-input`.
 | `TOUCH_SAMPLER_TASK` [1 ESP32 / 0 host] | mac_touch.h | Touch sampled by a core-0 task |
 | `MAC_IDLE_FF` [1] | mac_emulator.h | Idle fast-forward (Process Manager idle loop, Ticks-wait loops) |
 | `MAC_FRAME_THROTTLE` [1 ESP32 / 0 host] | mac_emulator.h | At most one frame per 16.626 ms |
+| `MAC_BOOT_TURBO` [0] | mac_emulator.h | No real-time cap until the Finder has been in front for 2 s (Raspberry Pi port: 1) |
 | `MAC_V8_CYCLE_SCALE` [2] | mac_emulator.h | LC II: CPU gets 1/N cycles per frame, device time ×N (Classic always 1) |
 | `EGRET_ONE_SEC_TICKS` [1] | mac_egret.c | Egret/Cuda 1 Hz tick packets (Mac clock advances) |
 | `DISK_WRITABLE` [1] | mac_disk_overlay.h | PSRAM copy-on-write disk overlay, volume unlocked |
