@@ -20,6 +20,7 @@
 #include "mac_disk_overlay.h"
 #include "mac_video.h"
 #include "mac_kbd.h"
+#include "mac_v8disk.h"
 #include "display.h"
 #include "esp_timer.h"
 #include "freertos/task.h"
@@ -207,6 +208,18 @@ static int host_ascii_adb(char c)
         if (map[i].c == c) return map[i].k;
     return -1;
 }
+
+#if MAC_ROM_LC_II
+/* --disk2 FILE (LC II, MAC_DRIVE2=1): second disk, in memory, writable */
+static uint8_t *host_d2;
+static uint32_t host_d2_size;
+static int host_d2_io(bool write, uint8_t *buf, uint32_t off, uint32_t cnt)
+{
+    if (write) memcpy(host_d2 + off, buf, cnt);
+    else       memcpy(buf, host_d2 + off, cnt);
+    return 0;
+}
+#endif
 
 static void host_keys_frame(void)
 {
@@ -474,6 +487,18 @@ int main(int argc, char **argv)
             for (int k = nk - 1; k >= 0; k--) host_key_add(f + nk + HOST_KEY_HOLD + (nk - 1 - k), ks[k], false);
             i++;
         }
+#if MAC_ROM_LC_II
+        else if (!strcmp(a, "--disk2") && v) {
+            FILE *f = fopen(v, "rb");
+            if (!f) { perror(v); return 1; }
+            fseek(f, 0, SEEK_END); host_d2_size = (uint32_t)ftell(f); fseek(f, 0, SEEK_SET);
+            host_d2 = malloc(host_d2_size);
+            if (!host_d2 || fread(host_d2, 1, host_d2_size, f) != host_d2_size) { perror(v); return 1; }
+            fclose(f);
+            v8disk_set_drive2(host_d2_size, host_d2_io, true);
+            i++;
+        }
+#endif
         else if (!strcmp(a, "--tap") && v) {
             if (host_ntaps < 16) host_taps[host_ntaps++] = atol(v);
             i++;

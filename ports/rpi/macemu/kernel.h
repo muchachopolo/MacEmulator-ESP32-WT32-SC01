@@ -20,6 +20,7 @@
 #include "videocore.h"
 #include "usbinput.h"
 #include "logfile.h"
+#include "diskimage.h"
 
 enum TShutdownMode
 {
@@ -56,6 +57,7 @@ private:
 	void ShowError (unsigned nCode);
 	static void PanicHandler (void);
 	static void DiskFill (uint32_t nOffset, uint32_t nCount);	// disk_ov_fill
+	static int Drive2IO (bool bWrite, uint8_t *pBuffer, uint32_t nOffset, uint32_t nCount);
 
 	// do not change this order
 	CActLED			m_ActLED;
@@ -90,6 +92,10 @@ private:
 	FIL		m_DiskFile;
 	u8		*m_pChunkLoaded;		// one byte per chunk
 	unsigned	m_nChunks;
+
+	char		m_Disk2Name[64];		// /mac/config.txt "disk2=" (LC II)
+	CDiskImage	m_Disk2;
+	u64		m_nDisk2LastWrite;
 
 	static CKernel *s_pThis;
 };

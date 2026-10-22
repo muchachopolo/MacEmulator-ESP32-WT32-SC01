@@ -32,6 +32,9 @@ static const uint8_t stub[] = {
     0x4E, 0x75,                           /* RTS -> IODone             */
 };
 
+#define INST_OFF    0x40u    /* drive-2 install routine (MAC_DRIVE2) */
+
+
 static uint32_t rom_prime;   /* the ROM driver's own Prime (logged only) */
 static uint32_t n_calls;
 
@@ -44,6 +47,74 @@ static inline void wr32(uint8_t *r, uint32_t a, uint32_t v)
 {
     r[a] = v >> 24; r[a+1] = v >> 16; r[a+2] = v >> 8; r[a+3] = v;
 }
+
+#if MAC_DRIVE2
+static struct {
+    uint32_t size;
+    v8disk_io_fn io;
+    bool writable;
+    bool installed;
+    uint8_t code[64];
+    int code_len;
+} d2;
+
+void v8disk_set_drive2(uint32_t size, v8disk_io_fn io, bool writable)
+{
+    d2.size = size;
+    d2.io = io;
+    d2.writable = writable;
+    uint32_t blocks = size / 512;
+    const uint8_t c[] = {
+        0x20, 0x3C, 0x00, 0x00, 0x00, 0x14,         /* MOVE.L #20,D0              */
+        0xA7, 0x1E,                                 /* _NewPtrSysClear            */
+        0x20, 0xBC, writable ? 0x00 : 0x80, 0x08, 0x01, 0x00,
+                                                    /* MOVE.L #wp/8/1/0,(A0): writeProt,
+                                                       diskInPlace=8 (fixed), installed */
+        0x58, 0x88,                                 /* ADDQ.L #4,A0 -> qLink      */
+        0x31, 0x7C, 0x00, 0x01, 0x00, 0x04,         /* MOVE.W #1,qType(A0)        */
+        0x31, 0x7C, 0xFF, 0xFB, 0x00, 0x08,         /* MOVE.W #-5,dQRefNum(A0)    */
+        0x31, 0x7C, (uint8_t)(blocks >> 8), (uint8_t)blocks, 0x00, 0x0C,
+                                                    /* MOVE.W #lo,dQDrvSz(A0)     */
+        0x31, 0x7C, (uint8_t)(blocks >> 24), (uint8_t)(blocks >> 16), 0x00, 0x0E,
+                                                    /* MOVE.W #hi,dQDrvSz2(A0)    */
+        0x20, 0x3C, 0x00, 0x02, 0xFF, 0xFB,         /* MOVE.L #$0002FFFB,D0       */
+        0xA0, 0x4E,                                 /* _AddDrive                  */
+        0x30, 0x7C, 0x00, 0x07,                     /* MOVEA.W #diskEvt,A0        */
+        0x70, 0x02,                                 /* MOVEQ #2,D0 (drive)        */
+        0xA0, 0x2F,                                 /* _PostEvent                 */
+        0x4E, 0x75,                                 /* RTS -> the event trap      */
+    };
+    memcpy(d2.code, c, sizeof c);
+    d2.code_len = sizeof c;
+    ESP_LOGI(TAG, "drive 2: %lu bytes (%s)", (unsigned long)size, writable ? "writable" : "locked");
+}
+
+int v8disk_aline_pre(unsigned int ir)
+{
+    if (!d2.size || d2.installed || (ir != 0xA860 && ir != 0xA970)) return 0;
+    uint8_t *r = mac_mem_get_ram();
+    if (!r || !mac_post_boot) return 0;
+    uint32_t wmgr = rd32(r, 0x09DE);
+    int al = r[0x0910], fl = r[0x02E0];                     /* the Finder in front */
+    if (wmgr == 0 || wmgr == 0xFFFFFFFF ||
+        !(al == fl && al > 0 && al < 32 && memcmp(r + 0x0911, r + 0x02E1, al) == 0))
+        return 0;
+    if (m68k_get_reg(NULL, M68K_REG_SR) & 0x0700) return 0;
+    uint32_t sp = m68k_get_reg(NULL, M68K_REG_A7) - 4;
+    m68k_write_memory_32(sp, m68k_get_reg(NULL, M68K_REG_PPC));   /* return to the trap */
+    m68k_set_reg(M68K_REG_A7, sp);
+    m68k_set_reg(M68K_REG_PC, V8DISK_BASE + INST_OFF);
+    d2.installed = true;
+    ESP_LOGW(TAG, "drive 2: installing (AddDrive + diskEvt)");
+    return 1;
+}
+#else
+void v8disk_set_drive2(uint32_t size, v8disk_io_fn io, bool writable)
+{
+    (void)size; (void)io; (void)writable;
+}
+int v8disk_aline_pre(unsigned int ir) { (void)ir; return 0; }
+#endif
 
 void v8disk_frame(void)
 {
@@ -96,6 +167,17 @@ static void v8disk_prime(void)
             q = rd32(ram, q) & 0xFFFFFF;
         }
     }
+#if MAC_DRIVE2
+    if (drive == 2 && d2.size) {
+        if ((trap & 0x0F) == 0x03 && !d2.writable)
+            err = wPrErr;
+        else if (pos > d2.size || cnt > d2.size - pos || buf + cnt > rsz)
+            err = paramErr;
+        else
+            err = (int16_t)d2.io((trap & 0x0F) == 0x03, ram + buf, pos, cnt);
+        done = err ? 0 : cnt;
+    } else
+#endif
     if (drive != 1) {
         err = nsDrvErr;
     } else if (!disk || !iwm_disk_inserted()) {
@@ -130,6 +212,9 @@ uint8_t v8disk_read(uint32_t address)
 {
     uint32_t off = address - V8DISK_BASE;
     if (off < sizeof(stub)) return stub[off];
+#if MAC_DRIVE2
+    if (off >= INST_OFF && off < INST_OFF + (uint32_t)d2.code_len) return d2.code[off - INST_OFF];
+#endif
     if (address == HOOK_ADDR) {
         v8disk_prime();
         return 0;

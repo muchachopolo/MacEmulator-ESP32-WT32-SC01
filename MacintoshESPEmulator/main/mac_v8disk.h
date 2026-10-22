@@ -33,6 +33,27 @@ uint8_t v8disk_read(uint32_t address);
 /* Once per emulated frame: (re)install the JPrime redirect when needed */
 void v8disk_frame(void);
 
+/*
+ * Second disk (MAC_DRIVE2, Raspberry Pi port): a platform-supplied volume
+ * mounted as drive 2 of .Sony once the Finder is up. The LC II has a single
+ * floppy, so the emulator adds the drive itself: at the Finder's next
+ * WaitNextEvent/GetNextEvent (A-line pre-hook, like MAC_QUIT_REPAINT) it
+ * runs a routine served from V8DISK_BASE+$40 that allocates a drive queue
+ * element (_NewPtrSysClear), _AddDrive's it as drive 2 / refNum -5
+ * (non-ejectable, size in dQDrvSz/dQDrvSz2) and posts diskEvt for drive 2;
+ * the system then mounts it. Prime requests for drive 2 go to io().
+ * 0 (default): no drive 2, exactly the previous behaviour.
+ */
+#ifndef MAC_DRIVE2
+#define MAC_DRIVE2 0
+#endif
+/* io: transfer cnt bytes at image offset off; returns 0 or a Mac error */
+typedef int (*v8disk_io_fn)(bool write, uint8_t *buf, uint32_t off, uint32_t cnt);
+void v8disk_set_drive2(uint32_t size, v8disk_io_fn io, bool writable);
+
+/* From the A-line pre-hook; 1 = handled (the install routine was entered) */
+int v8disk_aline_pre(unsigned int ir);
+
 #ifdef __cplusplus
 }
 #endif

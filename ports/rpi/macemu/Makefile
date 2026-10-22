@@ -33,7 +33,7 @@ CORE_SRCS    := mac_emulator.c mac_memory.c mac_video.c mac_via.c mac_scc.c mac_
                 mac_iwm.c mac_egret.c mac_v8video.c mac_v8disk.c mac_touch.c mac_rtc.c \
                 mac_disk_overlay.c mac_kbd.c
 MUSASHI_SRCS := m68kcpu.c m68kops.c softfloat/softfloat.c mac_native.c
-PI_SRCS      := main.cpp kernel.cpp platform.cpp videocore.cpp usbinput.cpp logfile.cpp
+PI_SRCS      := main.cpp kernel.cpp platform.cpp videocore.cpp usbinput.cpp logfile.cpp diskimage.cpp
 COMMON_SRCS  := ili9486.cpp xpt2046.cpp
 
 OBJS	= $(addprefix $(O)/,$(PI_SRCS:.cpp=.o)) $(O)/syscalls.o \
@@ -46,7 +46,7 @@ OBJS	= $(addprefix $(O)/,$(PI_SRCS:.cpp=.o)) $(O)/syscalls.o \
 # supplies the ROM and disk at run time (MAC_EXTERNAL_IMAGES) and a USB keyboard
 # (MAC_KEYBOARD).
 EMU_DEFS = -DHOST_BUILD=1 -DMAC_FRAME_THROTTLE=1 -DMAC_BOOT_TURBO=1 -DMAC_EXTERNAL_IMAGES=1 -DHAS_DISK_IMAGE=1 \
-	   -DMAC_KEYBOARD=1 $(if $(MAC_RAM_SIZE),-DMAC_RAM_SIZE=$(MAC_RAM_SIZE),) \
+	   -DMAC_KEYBOARD=1 -DMAC_DRIVE2=1 $(if $(MAC_RAM_SIZE),-DMAC_RAM_SIZE=$(MAC_RAM_SIZE),) \
 	   -DMAC_ROM_LC_II=$(MAC_ROM_LC_II) -DMAC_V8_CUDA=0 $(EXTRA_DEFS)
 
 EXTRAINCLUDE = -I shim -I ../common -I $(EMU)/main -I $(EMU)/components/musashi \

@@ -2474,9 +2474,15 @@ static __attribute__((noinline)) void dc_maybe_patch(void)
 /* ======================================================================== */
 #if MAC_NATIVE_DCMP
 extern int mac_quit_repaint_pre(unsigned int ir);   /* mac_emulator.c */
+#if MAC_ROM_LC_II && defined(MAC_DRIVE2) && MAC_DRIVE2
+extern int v8disk_aline_pre(unsigned int ir);       /* mac_v8disk.c */
+#endif
 
 int mac_native_aline_pre(unsigned int ir)
 {
+#if MAC_ROM_LC_II && defined(MAC_DRIVE2) && MAC_DRIVE2
+    if (v8disk_aline_pre(ir)) return 1;
+#endif
     if (mac_quit_repaint_pre(ir)) return 1;
     if (ir == DC_TRAP) return dc_trap();
     if (ir == 0xA81F) dc_maybe_patch();

@@ -7,6 +7,7 @@
 #include "kernel.h"
 #include "mac_emulator.h"
 #include "mac_disk_overlay.h"
+#include "mac_v8disk.h"
 #include "display.h"
 #include <circle/util.h>
 #include <circle/alloc.h>
@@ -41,7 +42,7 @@ CKernel *CKernel::s_pThis = 0;
 // have been reliable. Every file read goes through here.
 static u8 s_Bounce[0x10000] __attribute__ ((aligned (64)));
 
-static FRESULT ReadPieces (FIL *pFile, u8 *pDest, unsigned nCount)
+FRESULT ReadPieces (FIL *pFile, u8 *pDest, unsigned nCount)
 {
 	for (unsigned nDone = 0; nDone < nCount; )
 	{
@@ -81,10 +82,12 @@ CKernel::CKernel (void)
 	m_bMounted (FALSE),
 	m_bOnDemand (FALSE),
 	m_pChunkLoaded (0),
-	m_nChunks (0)
+	m_nChunks (0),
+	m_nDisk2LastWrite (0)
 {
 	s_pThis = this;
 	m_DiskName[0] = 0;
+	m_Disk2Name[0] = 0;
 	m_ActLED.Blink (3);
 }
 
@@ -203,6 +206,11 @@ void CKernel::ReadConfig (void)
 		{
 			memcpy (m_DiskName, &pText[i + 5], nLen - 5);
 			m_DiskName[nLen - 5] = 0;
+		}
+		else if (nLen > 6 && strncmp (&pText[i], "disk2=", 6) == 0 && nLen - 6 < sizeof m_Disk2Name)
+		{
+			memcpy (m_Disk2Name, &pText[i + 6], nLen - 6);
+			m_Disk2Name[nLen - 6] = 0;
 		}
 		i = nEnd + 1;
 	}
@@ -345,6 +353,22 @@ boolean CKernel::LoadImages (void)
 		return TRUE;
 	}
 
+#if MAC_ROM_LC_II && MAC_DRIVE2
+	if (m_Disk2Name[0])				// second disk (drive 2)
+	{
+		CString Path;
+		Path.Format (MAC_DIR "%s", m_Disk2Name);
+		if (m_Disk2.Open (Path))
+		{
+			v8disk_set_drive2 (m_Disk2.GetSize (), Drive2IO, TRUE);
+		}
+		else
+		{
+			m_Logger.Write (From, LogWarning, "%s: cannot open", (const char *) Path);
+		}
+	}
+#endif
+
 	// The whole image fits the overlay, so every block can be written; the
 	// file is updated from it by FlushDisk().
 	mac_ext_disk = m_pDisk;
@@ -353,8 +377,22 @@ boolean CKernel::LoadImages (void)
 	return TRUE;
 }
 
+int CKernel::Drive2IO (bool bWrite, uint8_t *pBuffer, uint32_t nOffset, uint32_t nCount)
+{
+	s_pThis->m_nDisk2LastWrite = bWrite ? CTimer::GetClockTicks64 () : s_pThis->m_nDisk2LastWrite;
+	return bWrite ? s_pThis->m_Disk2.Write (pBuffer, nOffset, nCount)
+		      : s_pThis->m_Disk2.Read (pBuffer, nOffset, nCount);
+}
+
 void CKernel::FlushDisk (boolean bForce)
 {
+	if (m_Disk2.IsDirty ()
+	    && (bForce || CTimer::GetClockTicks64 () - m_nDisk2LastWrite >= FlushQuietUs))
+	{
+		unsigned n = m_Disk2.Flush ();
+		m_Logger.Write (From, LogNotice, "%s: saved %u blocks", m_Disk2Name, n);
+	}
+
 	if (!m_pDisk || !disk_ov_active ())
 	{
 		return;

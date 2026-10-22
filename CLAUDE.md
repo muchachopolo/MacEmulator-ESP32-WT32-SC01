@@ -223,6 +223,7 @@ Details: `docs/display-pipeline.md#touch-input`.
 | `DISK_OVERLAY_KB` [384 Classic / 256 LC II] | mac_disk_overlay.h | Overlay pool size |
 | `MAC_QUIT_REPAINT` [1] | mac_emulator.c | After a full-screen/game-mode app's `_ExitToShell`, the Finder's next WaitNextEvent/GetNextEvent first runs PaintBehind(WindowList, GrayRgn) + DrawMenuBar (old games leave their screen behind otherwise). Byte-identical when no such app quits |
 | `MAC_KEYBOARD` [0] | mac_kbd.h | Keyboard input (`kbd_key`, ADB codes): LC II = ADB keyboard at address 2 on the Egret HLE; Classic = C mirror of the ROM keyboard handler (KeyMap, auto-key, PostEvent, US layout). Pi port: 1 |
+| `MAC_DRIVE2` [0] | mac_v8disk.h | LC II: platform-supplied second disk as .Sony drive 2 (AddDrive + diskEvt injected at the Finder's event loop; I/O via a callback). Pi port: 1, `disk2=` in `/mac/config.txt`; host `--disk2 FILE` |
 | `MAC_EXTERNAL_IMAGES` [0] | mac_emulator.h | ROM/disk set at run time via `mac_ext_rom`/`mac_ext_disk` (Raspberry Pi port, from SD) instead of linked-in `_binary_*` symbols |
 | `MAC_DIAG` [0] | mac_memory.h | Boot diagnostics/spin detectors on memory hot paths |
 | `MAC_VIDEO_DIRTY` [1] | mac_video.c | Skip unchanged 20-line strips |
