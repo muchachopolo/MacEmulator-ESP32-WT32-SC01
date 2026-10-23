@@ -11,6 +11,7 @@
 #include <circle/timer.h>
 #include <circle/logger.h>
 #include <circle/cputhrottle.h>
+#include <circle/sound/hdmisoundbasedevice.h>
 #include <circle/spimaster.h>
 #include <circle/types.h>
 #include <SDCard/emmc.h>
@@ -45,7 +46,10 @@ public:
 	CCPUThrottle *GetCPUThrottle (void) { return &m_CPUThrottle; }
 	CUSBInput *GetUSBInput (void) { return &m_USBInput; }
 	CLogFile *GetLogFile (void) { return &m_LogFile; }
+	void PumpAudio (void);					// frame hook: ASC samples -> HDMI sound
 	boolean IsLogEnabled (void) const { return m_bLog; }	// /mac/config.txt log=1
+	boolean IsHDMI (void) const { return m_bHDMI; }		// a monitor answered the EDID request
+	CScreenDevice *GetScreen (void) { return &m_Screen; }
 
 	// Copy the blocks the Mac changed on drive 1 into its image (RAM; the
 	// SD worker writes them). bForce: now, not at most every 250 ms.
@@ -56,6 +60,7 @@ private:
 	boolean LoadImages (void);
 	u8 *LoadFile (const char *pName, unsigned *pSize);
 	void ReadConfig (void);
+	boolean DetectHDMI (void);
 	void ShowError (unsigned nCode);
 	static void PanicHandler (void);
 	static void DiskFill (uint32_t nOffset, uint32_t nCount);	// disk_ov_fill
@@ -78,10 +83,14 @@ private:
 	CXPT2046		m_Touch;
 	CEMMCDevice		m_EMMC;
 	FATFS			m_FileSystem;
+	CHDMISoundBaseDevice	*m_pHDMISound;			// LC II sound over HDMI (MAC_SOUND)
 	CVideoCore		m_VideoCore;
 	CUSBHCIDevice		m_USBHCI;
 	CUSBInput		m_USBInput;
 
+	boolean		m_bHDMI;			// monitor connected: show the Mac on it
+	unsigned	m_nMouse;			// /mac/config.txt "mouse=" speed in percent (LC II)
+	boolean		m_bSound;			// /mac/config.txt "sound=0" turns the ASC off
 	boolean		m_bLog;				// /mac/config.txt "log=1"
 	char		m_DiskName[64];			// /mac/config.txt "disk="
 	u8		*m_pDisk;			// drive-1 image data (m_Disk1)

@@ -17,6 +17,7 @@
 #include "mac_v8disk.h"
 #include "mac_egret.h"
 #endif
+#include "mac_asc.h"
 #include "mac_touch.h"
 #include "mac_kbd.h"
 #include "m68k.h"
@@ -713,7 +714,7 @@ static void v8_apply_touch(const touch_report_t *tr, int frame)
         if (gm_click) mouse_btn_queue(tr->button, true);
     }
     if (r) mouse_btn_flush(r, 0, 0);
-    egret_adb_mouse(0, 0, gm_click ? false : tr->button);
+    egret_adb_mouse(tr->adb_dx, tr->adb_dy, gm_click ? false : tr->button);
     if (tr->btn_changed) {
         static int blog;
         if (r && blog < 60) {
@@ -2098,6 +2099,9 @@ void mac_emu_run(void *param)
              * when a full track has been read.  Let the timeout fire
              * naturally so the driver exits its byte-reading loop. */
             via_tick(executed * MAC_CYCLE_SCALE);   /* device cycles */
+#if MAC_SOUND
+            asc_tick(executed * MAC_CYCLE_SCALE);
+#endif
 
             /* Check for VIA interrupt -> raise CPU IRQ level 1 */
 #if MAC_ROM_LC_II
@@ -2133,6 +2137,9 @@ void mac_emu_run(void *param)
                         total_executed += c;
                         ff_stat_skipped += c;
                         via_tick(c * MAC_CYCLE_SCALE);
+#if MAC_SOUND
+                        asc_tick(c * MAC_CYCLE_SCALE);
+#endif
                         if (!vblank_fired && total_executed >= MAC_CPU_CYCLES_PER_FRAME / 2) {
                             via_vblank();
 #if MAC_ROM_LC_II
@@ -4045,6 +4052,7 @@ void mac_emu_run(void *param)
             /* Uncapped until the Finder has been in front for 2 s (or 30000
              * frames at most): the boot runs as fast as the host allows. */
             static int turbo_left = 30000, finder_frames;
+            bool turbo = false;
             if (turbo_left > 0) {
                 uint8_t *r = mac_mem_get_ram();
                 uint32_t wmgr = r ? rd32(r, 0x09DE) : 0;
@@ -4058,9 +4066,15 @@ void mac_emu_run(void *param)
                     ESP_LOGI(TAG, "BOOT-TURBO: off at frame %d (%lld ms)", frame_count,
                              (long long)(esp_timer_get_time() / 1000));
                 }
-                thr_base = 0;                   /* restart the cap afterwards */
-                thr_frames = 0;
-            } else
+                /* Queued audio (the start-up chime) must play at its own
+                 * speed: stay capped while the consumer has a backlog. */
+                turbo = !asc_backlog();
+                if (turbo) {
+                    thr_base = 0;               /* restart the cap afterwards */
+                    thr_frames = 0;
+                }
+            }
+            if (!turbo)
 #endif
             {
             int64_t now = esp_timer_get_time();

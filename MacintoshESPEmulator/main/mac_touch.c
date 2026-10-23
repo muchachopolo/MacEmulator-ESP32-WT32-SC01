@@ -45,6 +45,7 @@ static const char *TAG = "touch";
 #define TQ_LEN 16
 static struct {
     int acc_dx, acc_dy;             /* movement after the last queued transition */
+    int m_dx, m_dy;                 /* MAC_MOUSE_ADB: mouse counts not yet reported */
     struct { int dx, dy; bool btn; } q[TQ_LEN];
     int qh, qn;
     bool touching, is_drag, tap_drag;
@@ -150,8 +151,13 @@ void touch_sample(int64_t now_us)
 void touch_mouse_input(int dx, int dy, bool button)
 {
     T_LOCK();
+#if MAC_MOUSE_ADB
+    sh.m_dx += dx;
+    sh.m_dy += dy;
+#else
     sh.acc_dx += dx;
     sh.acc_dy += dy;
+#endif
     push_btn(button);
     T_UNLOCK();
 }
@@ -160,6 +166,9 @@ void touch_consume(touch_report_t *rep)
 {
     memset(rep, 0, sizeof(*rep));
     T_LOCK();
+    rep->adb_dx = sh.m_dx;          /* mouse counts go out at once, never held back */
+    rep->adb_dy = sh.m_dy;
+    sh.m_dx = sh.m_dy = 0;
     if (c.hold > 0) c.hold--;
     if (sh.qn > 0) {
         if (c.hold == 0) {

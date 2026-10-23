@@ -59,6 +59,7 @@ void     v8video_write(uint32_t address, uint8_t value);
 void     v8video_vbl(bool active);
 /* Pseudo-VIA2 IFR & IER != 0 (CPU IRQ level 2) */
 bool     v8video_irq_pending(void);
+void     v8video_asc_irq(bool active);   /* ASC interrupt = pseudo-VIA2 IFR bit 4 */
 /* Build the native-LCD declaration-ROM copy. Returns the ROM file offset
  * where *copy starts (byte reads at >= that offset use the copy), or
  * 0xFFFFFFFF when nothing is patched. */

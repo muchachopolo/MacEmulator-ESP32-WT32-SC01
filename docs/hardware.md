@@ -77,4 +77,4 @@ used (DUPLDST measured 1.3% slower).
 
 The board's expansion header is unused today. Planned: an external SPI/I2C
 keyboard and a joystick (see [`spec/next-steps-plan.md`](../spec/next-steps-plan.md)).
-The emulator has no audio output yet.
+The ESP32 build has no audio output (`MAC_SOUND=0`); the LC II ASC is emulated for the Raspberry Pi port, which plays it over HDMI.

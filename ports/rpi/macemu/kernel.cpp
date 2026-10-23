@@ -9,7 +9,10 @@
 #include "mac_disk_overlay.h"
 #include "mac_v8disk.h"
 #include "display.h"
+#include "mac_asc.h"
+#include "platform.h"
 #include <circle/util.h>
+#include <circle/bcmpropertytags.h>
 #include <circle/alloc.h>
 
 static const char From[] = "mac";
@@ -67,6 +70,7 @@ CKernel::CKernel (void)
 	m_LCD (&m_SPI),
 	m_Touch (&m_SPI),
 	m_EMMC (&m_Interrupt, &m_Timer, &m_ActLED),
+	m_pHDMISound (0),
 	m_VideoCore (CMemorySystem::Get ()),
 	m_USBHCI (&m_Interrupt, &m_Timer, TRUE),		// TRUE: plug-and-play
 	m_USBInput (&m_USBHCI),
@@ -77,6 +81,9 @@ CKernel::CKernel (void)
 	m_bMounted (FALSE)
 {
 	s_pThis = this;
+	m_bHDMI = FALSE;
+	m_bSound = TRUE;
+	m_nMouse = 25;
 	m_bLog = FALSE;
 	m_DiskName[0] = 0;
 	m_Disk2Name[0] = 0;
@@ -86,6 +93,7 @@ CKernel::CKernel (void)
 boolean CKernel::Initialize (void)
 {
 	boolean bOK = m_Screen.Initialize ();
+	m_bHDMI = bOK && DetectHDMI ();
 	if (bOK) bOK = m_Serial.Initialize (115200);
 	if (bOK)
 	{
@@ -100,6 +108,61 @@ boolean CKernel::Initialize (void)
 	if (bOK) bOK = m_EMMC.Initialize ();
 	if (bOK) bOK = m_USBHCI.Initialize ();
 	return bOK;
+}
+
+// A monitor is connected if the firmware can read its EDID. Without one the
+// firmware still hands out a (virtual) frame buffer, so that alone proves nothing.
+boolean CKernel::DetectHDMI (void)
+{
+	CBcmPropertyTags Tags;
+	TPropertyTagEDIDBlock Edid;
+	memset (&Edid, 0, sizeof Edid);
+	Edid.nBlockNumber = EDID_FIRST_BLOCK;
+	return Tags.GetTag (PROPTAG_GET_EDID_BLOCK, &Edid, sizeof Edid, 8)
+	       && Edid.nStatus == EDID_STATUS_SUCCESS;
+}
+
+// ASC samples (44.1 kHz stereo, one frame's worth at a time) -> the HDMI sound
+// queue. Called from the frame hook on core 0; Circle's DMA completion drains
+// the queue and plays silence when it runs dry.
+void CKernel::PumpAudio (void)
+{
+#if MAC_SOUND
+	if (!m_pHDMISound)
+	{
+		return;
+	}
+	s16 Buffer[256 * 2];
+	static unsigned s_nLastAvail;
+	static u64 s_nStallSince;
+	unsigned nAvail = m_pHDMISound->GetQueueFramesAvail ();
+	unsigned nFree = m_pHDMISound->GetQueueSizeFrames () - nAvail;
+	u64 nNow = CTimer::GetClockTicks64 ();
+	if (nFree > 0 || nAvail != s_nLastAvail)
+	{
+		s_nStallSince = nNow;
+	}
+	else if (nNow - s_nStallSince > 300000)
+	{
+		// The HDMI side has stopped taking audio: drop it rather than let the
+		// emulator wait for it (boot turbo is held back while audio is queued).
+		while (asc_pull (Buffer, 256) > 0)
+		{
+		}
+		s_nStallSince = nNow;
+	}
+	s_nLastAvail = nAvail;
+	while (nFree > 0)
+	{
+		unsigned n = asc_pull (Buffer, nFree < 256 ? nFree : 256);
+		if (!n)
+		{
+			break;
+		}
+		m_pHDMISound->Write (Buffer, n * 2 * sizeof (s16));
+		nFree -= n;
+	}
+#endif
 }
 
 // A panic (exception, assertion): save the log, show a red 9.
@@ -203,6 +266,19 @@ void CKernel::ReadConfig (void)
 		{
 			m_bLog = pText[i + 4] == '1';
 		}
+		else if (nLen == 7 && strncmp (&pText[i], "sound=", 6) == 0)
+		{
+			m_bSound = pText[i + 6] != '0';
+		}
+		else if (nLen > 6 && strncmp (&pText[i], "mouse=", 6) == 0)
+		{
+			unsigned n = 0;
+			for (unsigned k = i + 6; k < i + nLen && pText[k] >= '0' && pText[k] <= '9'; k++)
+			{
+				n = n * 10 + (pText[k] - '0');
+			}
+			m_nMouse = n < 1 ? 1 : n > 1000 ? 1000 : n;
+		}
 		else if (nLen > 6 && strncmp (&pText[i], "disk2=", 6) == 0 && nLen - 6 < sizeof m_Disk2Name)
 		{
 			memcpy (m_Disk2Name, &pText[i + 6], nLen - 6);
@@ -241,7 +317,10 @@ boolean CKernel::LoadImages (void)
 	mac_ext_rom_size = nROMSize;
 
 	ReadConfig ();
-	m_Logger.Write (From, LogNotice, "disk setting: \"%s\", log %s", m_DiskName, m_bLog ? "on" : "off");
+	m_Logger.Write (From, LogNotice, "disk setting: \"%s\", log %s, sound %s", m_DiskName,
+			m_bLog ? "on" : "off", m_bSound ? "on" : "off");
+	asc_set_enabled (m_bSound);
+	m_USBInput.SetMouseScale (m_nMouse);
 	if (m_bLog)
 	{
 		m_LogFile.Save (TRUE);
@@ -337,6 +416,7 @@ void CKernel::FlushDisk (boolean bForce)
 TShutdownMode CKernel::Run (void)
 {
 	m_Logger.Write (From, LogNotice, "Mac emulator, compiled " __DATE__ " " __TIME__);
+	m_Logger.Write (From, LogNotice, "HDMI monitor %s", m_bHDMI ? "detected: the Mac screen goes there" : "not detected");
 	m_Logger.Write (From, LogNotice, "ARM clock %u MHz, memory %u MB", m_CPUThrottle.GetClockRate () / 1000000,
 			(unsigned) (CMemorySystem::Get ()->GetMemSize () >> 20));
 
@@ -364,6 +444,29 @@ TShutdownMode CKernel::Run (void)
 	m_SDWorker.SetImages (m_Disk1.IsOpen () ? &m_Disk1 : 0, m_Disk2.IsOpen () ? &m_Disk2 : 0);
 	m_SDWorker.SetLog (&m_LogFile, m_bLog);
 	m_SDWorker.Start ();
+	if (m_bHDMI)
+	{
+		hdmi_start ();					// log text off the screen, Mac on
+		m_LogFile.SetTarget (&m_Serial);
+	}
+#if MAC_SOUND
+	if (m_bHDMI && m_bSound)				// the ASC's sound goes out over HDMI
+	{
+		m_pHDMISound = new CHDMISoundBaseDevice (&m_Interrupt, ASC_OUT_RATE);
+		m_pHDMISound->AllocateQueue (120);
+		m_pHDMISound->SetWriteFormat (SoundFormatSigned16, 2);
+		if (m_pHDMISound->Start ())
+		{
+			m_Logger.Write (From, LogNotice, "HDMI sound: %u Hz", (unsigned) ASC_OUT_RATE);
+		}
+		else
+		{
+			m_Logger.Write (From, LogWarning, "HDMI sound did not start");
+			delete m_pHDMISound;
+			m_pHDMISound = 0;
+		}
+	}
+#endif
 	if (!m_VideoCore.Initialize ())				// starts cores 1 and 2
 	{
 		m_Logger.Write (From, LogPanic, "cannot start core 1");

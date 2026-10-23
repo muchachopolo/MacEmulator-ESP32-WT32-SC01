@@ -25,14 +25,18 @@ TARGET     := kernel7-lc2
 MAC_RAM_SIZE ?= 0x800000
 # Full LC II CPU speed: the ESP32 halves the 68030's cycles per frame
 # (MAC_V8_CYCLE_SCALE=2) to keep up; the Pi has the headroom.
-LC2_DEFS   := -DMAC_V8_CYCLE_SCALE=1
+# MAC_SOUND: LC II ASC (FIFO mode) -> HDMI audio. Needs the full CPU speed:
+# the ROM chime generator cannot keep a 22 kHz FIFO full at scale 2.
+# MAC_MOUSE_ADB: USB mouse movement goes through the emulated ADB mouse, so the
+# Mac's tracking curve and the Mouse control panel apply (touch stays 1:1).
+LC2_DEFS   := -DMAC_V8_CYCLE_SCALE=1 -DMAC_SOUND=1 -DMAC_MOUSE_ADB=1
 else
 MACHINE    := classic
 TARGET     := kernel7
 endif
 O          := obj-$(MACHINE)
 
-CORE_SRCS    := mac_emulator.c mac_memory.c mac_video.c mac_via.c mac_scc.c mac_scsi.c \
+CORE_SRCS    := mac_emulator.c mac_memory.c mac_video.c mac_via.c mac_scc.c mac_asc.c mac_scsi.c \
                 mac_iwm.c mac_egret.c mac_v8video.c mac_v8disk.c mac_touch.c mac_rtc.c \
                 mac_disk_overlay.c mac_kbd.c
 MUSASHI_SRCS := m68kcpu.c m68kops.c softfloat/softfloat.c mac_native.c
@@ -57,7 +61,8 @@ EXTRAINCLUDE = -I shim -I ../common -I $(EMU)/main -I $(EMU)/components/musashi 
 
 LIBS	= $(CIRCLEHOME)/addon/fatfs/libfatfs.a $(CIRCLEHOME)/addon/SDCard/libsdcard.a \
 	  $(CIRCLEHOME)/lib/usb/libusb.a $(CIRCLEHOME)/lib/input/libinput.a \
-	  $(CIRCLEHOME)/lib/fs/libfs.a $(CIRCLEHOME)/lib/libcircle.a
+	  $(CIRCLEHOME)/lib/fs/libfs.a $(CIRCLEHOME)/lib/sound/libsound.a \
+	  $(CIRCLEHOME)/lib/libcircle.a
 
 CHECK_DEPS = 0
 include $(CIRCLEHOME)/Rules.mk

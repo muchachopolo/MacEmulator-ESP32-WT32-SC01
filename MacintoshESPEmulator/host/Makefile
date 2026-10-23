@@ -42,7 +42,7 @@ WARN     := -Wall -Wno-unused-variable -Wno-unused-function -Wno-unused-but-set-
 # Same suppressions as components/musashi/CMakeLists.txt
 MUSASHI_WARN := -w
 
-CORE_SRCS := mac_emulator.c mac_memory.c mac_video.c mac_via.c mac_scc.c mac_scsi.c mac_iwm.c mac_egret.c mac_v8video.c mac_v8disk.c mac_touch.c mac_rtc.c mac_disk_overlay.c mac_kbd.c
+CORE_SRCS := mac_emulator.c mac_memory.c mac_video.c mac_via.c mac_scc.c mac_asc.c mac_scsi.c mac_iwm.c mac_egret.c mac_v8video.c mac_v8disk.c mac_touch.c mac_rtc.c mac_disk_overlay.c mac_kbd.c
 MUSASHI_SRCS := m68kcpu.c m68kops.c softfloat/softfloat.c mac_native.c
 
 OBJS := $(addprefix $(BUILD)/main/,$(CORE_SRCS:.c=.o)) \

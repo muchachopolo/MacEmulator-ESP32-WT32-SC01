@@ -19,6 +19,7 @@ static const char *TAG = "v8vid";
 
 static uint8_t *vram;
 static uint8_t  pvia[0x20];        /* pseudo-VIA2 registers $00-$1F */
+static bool     asc_level;         /* ASC interrupt line: IFR bit 4 follows it */
 static uint8_t  clut[256 * 3];
 static uint8_t  vdac_regs[16];
 static uint8_t  vdac_index;
@@ -53,6 +54,7 @@ bool v8video_init(void)
     }
     memset(vram, 0, V8_VRAM_SIZE);
     memset(pvia, 0, sizeof(pvia));
+    asc_level = false;
     memset(clut, 0, sizeof(clut));
     memset(vdac_regs, 0, sizeof(vdac_regs));
     vdac_index = 0;
@@ -161,6 +163,8 @@ uint32_t v8video_get_pal_gen(void) { return pal_gen; }
  * where the cursor task (jCrsrTask) gets called on Mac II-class ROMs. */
 static void pvia_recalc(void)
 {
+    if (asc_level) pvia[0x03] |= 0x10;      /* a level: software cannot clear it */
+    else           pvia[0x03] &= (uint8_t)~0x10;
     if (~pvia[0x02] & 0x78) pvia[0x03] |= 0x02;
     else                    pvia[0x03] &= (uint8_t)~0x02;
     via_update_cpu_irq();
@@ -169,6 +173,12 @@ static void pvia_recalc(void)
 bool v8video_irq_pending(void)
 {
     return (pvia[0x03] & pvia[0x13] & 0x7F) != 0;
+}
+
+void v8video_asc_irq(bool active)
+{
+    asc_level = active;
+    pvia_recalc();
 }
 
 void v8video_vbl(bool active)

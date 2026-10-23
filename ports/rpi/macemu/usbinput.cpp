@@ -4,6 +4,7 @@
 #include <circle/logger.h>
 #include <circle/timer.h>
 #include <circle/util.h>
+#include <circle/string.h>
 #include "mac_kbd.h"
 #include "mac_touch.h"
 
@@ -63,10 +64,16 @@ CUSBInput *CUSBInput::s_pThis = 0;
 
 CUSBInput::CUSBInput (CUSBHCIDevice *pUSBHCI)
 :	m_pUSBHCI (pUSBHCI),
-	m_pKeyboard (0),
-	m_pMouse (0),
-	m_nLastPnP (0)
+	m_nLastPnP (0),
+	m_nMouseScale (25),
+	m_nRemX (0),
+	m_nRemY (0)
 {
+	for (unsigned i = 0; i < MaxDevices; i++)
+	{
+		m_pKeyboard[i] = 0;
+		m_pMouse[i] = 0;
+	}
 	s_pThis = this;
 }
 
@@ -144,14 +151,38 @@ void CUSBInput::MouseStatusHandler (unsigned nButtons, int nDisplacementX, int n
 
 void CUSBInput::KeyboardRemoved (CDevice *pDevice, void *pContext)
 {
-	s_pThis->m_pKeyboard = 0;
+	*(CDevice **) pContext = 0;
 	CLogger::Get ()->Write (From, LogNotice, "keyboard removed");
 }
 
 void CUSBInput::MouseRemoved (CDevice *pDevice, void *pContext)
 {
-	s_pThis->m_pMouse = 0;
+	*(CDevice **) pContext = 0;
 	CLogger::Get ()->Write (From, LogNotice, "mouse removed");
+}
+
+boolean CUSBInput::IsKnown (CDevice *const *pList, CDevice *pDevice)
+{
+	for (unsigned i = 0; i < MaxDevices; i++)
+	{
+		if (pList[i] == pDevice)
+		{
+			return TRUE;
+		}
+	}
+	return FALSE;
+}
+
+CDevice **CUSBInput::FreeSlot (CDevice **pList)
+{
+	for (unsigned i = 0; i < MaxDevices; i++)
+	{
+		if (!pList[i])
+		{
+			return &pList[i];
+		}
+	}
+	return 0;
 }
 
 void CUSBInput::Poll (void)
@@ -163,27 +194,37 @@ void CUSBInput::Poll (void)
 		if (m_pUSBHCI->UpdatePlugAndPlay ())
 		{
 			CDeviceNameService *pNames = CDeviceNameService::Get ();
-			if (!m_pKeyboard)
+			for (unsigned i = 0; i < MaxDevices; i++)
 			{
+				CString Name;
+				Name.Format ("ukbd%u", i + 1);
 				CUSBKeyboardDevice *pKeyboard =
-					(CUSBKeyboardDevice *) pNames->GetDevice ("ukbd1", FALSE);
-				if (pKeyboard)
+					(CUSBKeyboardDevice *) pNames->GetDevice (Name, FALSE);
+				if (pKeyboard && !IsKnown (m_pKeyboard, pKeyboard))
 				{
-					m_pKeyboard = pKeyboard;
-					pKeyboard->RegisterRemovedHandler (KeyboardRemoved);
-					pKeyboard->RegisterKeyStatusHandlerRaw (KeyStatusHandler);
-					CLogger::Get ()->Write (From, LogNotice, "keyboard attached");
+					CDevice **pSlot = FreeSlot (m_pKeyboard);
+					if (pSlot)
+					{
+						*pSlot = pKeyboard;
+						pKeyboard->RegisterRemovedHandler (KeyboardRemoved, pSlot);
+						pKeyboard->RegisterKeyStatusHandlerRaw (KeyStatusHandler);
+						CLogger::Get ()->Write (From, LogNotice, "keyboard attached (%s)",
+									(const char *) Name);
+					}
 				}
-			}
-			if (!m_pMouse)
-			{
-				CMouseDevice *pMouse = (CMouseDevice *) pNames->GetDevice ("mouse1", FALSE);
-				if (pMouse)
+				Name.Format ("mouse%u", i + 1);
+				CMouseDevice *pMouse = (CMouseDevice *) pNames->GetDevice (Name, FALSE);
+				if (pMouse && !IsKnown (m_pMouse, pMouse))
 				{
-					m_pMouse = pMouse;
-					pMouse->RegisterRemovedHandler (MouseRemoved);
-					pMouse->RegisterStatusHandler (MouseStatusHandler);
-					CLogger::Get ()->Write (From, LogNotice, "mouse attached");
+					CDevice **pSlot = FreeSlot (m_pMouse);
+					if (pSlot)
+					{
+						*pSlot = pMouse;
+						pMouse->RegisterRemovedHandler (MouseRemoved, pSlot);
+						pMouse->RegisterStatusHandler (MouseStatusHandler);
+						CLogger::Get ()->Write (From, LogNotice, "mouse attached (%s)",
+									(const char *) Name);
+					}
 				}
 			}
 		}
@@ -216,6 +257,14 @@ void CUSBInput::Poll (void)
 	}
 	if (bMouse)
 	{
+#if MAC_MOUSE_ADB
+		m_nRemX += nDX * (int) m_nMouseScale;
+		m_nRemY += nDY * (int) m_nMouseScale;
+		nDX = m_nRemX / 100;
+		nDY = m_nRemY / 100;
+		m_nRemX -= nDX * 100;
+		m_nRemY -= nDY * 100;
+#endif
 		touch_mouse_input (nDX, nDY, bButton);
 	}
 }

@@ -49,6 +49,7 @@ idf_component_register(
          "mac_egret.c"
          "mac_touch.c"
          "mac_scc.c"
+         "mac_asc.c"
          "mac_scsi.c"
          "mac_iwm.c"
          "mac_v8video.c"

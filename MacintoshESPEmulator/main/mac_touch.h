@@ -33,6 +33,18 @@ extern "C" {
 #endif
 #endif
 
+/* 1 = LC II: a relative pointing device (touch_mouse_input) is fed to the emulated
+ * ADB mouse as deltas, so the OS applies its own tracking curve (Mouse control
+ * panel). 0 = its movement is added to the cursor position 1:1 like the touch
+ * gestures. The touch panel always moves the cursor directly. */
+#ifndef MAC_MOUSE_ADB
+#define MAC_MOUSE_ADB 0
+#endif
+#if MAC_MOUSE_ADB && !MAC_ROM_LC_II
+#undef MAC_MOUSE_ADB
+#define MAC_MOUSE_ADB 0
+#endif
+
 #define TOUCH_POLL_US        16000   /* ~60 Hz sampling */
 #define TAP_MOVE_THRESH      8       /* px: beyond this = drag */
 #define TAP_TIME_US          300000  /* max tap duration */
@@ -42,6 +54,7 @@ extern "C" {
 
 typedef struct {
     int  dx, dy;        /* screen-pixel movement to apply this frame */
+    int  adb_dx, adb_dy;/* MAC_MOUSE_ADB: relative mouse counts for the ADB mouse */
     bool button;        /* button state to present this frame */
     bool btn_changed;   /* button differs from the previous frame */
     bool touching;      /* finger on panel (latest sample; for logging) */

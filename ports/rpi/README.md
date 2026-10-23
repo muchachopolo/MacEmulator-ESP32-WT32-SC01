@@ -57,6 +57,8 @@ Plan and status: [`spec/raspberry-pi-port.md`](../../spec/raspberry-pi-port.md).
 |---|---|
 | `disk=NAME` | Boot disk (drive 1) in `/mac`. Default: `custom_753.dsk`, else `OS_750_boot.dsk` |
 | `disk2=NAME` | Second disk (drive 2), LC II only |
+| `mouse=25` | LC II: USB mouse speed in percent (default `25`). The movement goes through the Mac's own tracking, so the Mouse control panel also changes the speed; raise this for a slow-feeling mouse, lower it for a fast one |
+| `sound=0` | LC II: switch the Apple Sound Chip off (default `1`; the Mac then sees no sound hardware) |
 | `log=1` | Write a diagnostic log to `/mac/log.txt` every 30 s (default `0`: errors only, saved on a crash) |
 
 A full System 7.5.3 needs the LC II (8 MB); the Classic has 2 MB. Big images can
@@ -64,6 +66,11 @@ be split into a bootable System disk and data disks with
 [`tools/split_disk.py`](../../tools/split_disk.py), which can also disable
 extensions and control panels that slow the emulated Mac down (see
 [`docs/custom-disk.md`](../../docs/custom-disk.md)).
+
+**Sound (LC II only).** With an HDMI monitor connected at power-up the Mac
+screen and its sound (Apple Sound Chip, 44.1 kHz stereo) go out over HDMI. If a
+monitor with speakers stays silent, add `hdmi_drive=2` to the card's
+`config.txt` (forces HDMI rather than DVI mode). The Classic has no sound.
 
 Copying to the card from Windows: **eject it before removing it** (Windows
 caches writes).

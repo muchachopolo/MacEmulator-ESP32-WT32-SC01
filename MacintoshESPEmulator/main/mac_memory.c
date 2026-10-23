@@ -8,6 +8,7 @@
 #include "mac_emulator.h"
 #include "mac_via.h"
 #include "mac_scc.h"
+#include "mac_asc.h"
 #include "mac_scsi.h"
 #include "mac_iwm.h"
 #include "mac_v8video.h"
@@ -305,6 +306,9 @@ bool mac_mem_init(const uint8_t *rom_data, uint32_t rom_sz,
     iwm_init(disk_data, disk_size);
 #if MAC_ROM_LC_II
     if (!v8video_init()) return false;
+#if MAC_SOUND
+    asc_init();
+#endif
     v8_vram = v8video_get_vram();
     v8_decl_off = v8video_patch_rom(rom, rom_size, &v8_decl);
 #endif
@@ -406,6 +410,11 @@ static inline uint8_t mem_read_byte(uint32_t address)
     if (address >= 0xF10000 && address < 0xF14000) {
         return scsi_read(address);
     }
+#if MAC_SOUND
+    if (address >= 0xF14000 && address < 0xF16000) {
+        return asc_read(address);
+    }
+#endif
     /* VDAC $F24000, pseudo-VIA2 $F26000, VRAM $F40000-$FBFFFF */
     if (address >= 0xF24000 && address < 0xFC0000 &&
         (address >= V8_VRAM_BASE || address < 0xF28000)) {
@@ -711,6 +720,12 @@ static inline void mem_write_byte(uint32_t address, uint8_t value)
         scsi_write(address, value);
         return;
     }
+#if MAC_SOUND
+    if (address >= 0xF14000 && address < 0xF16000) {
+        asc_write(address, value);
+        return;
+    }
+#endif
     if (address >= 0xF24000 && address < 0xFC0000 &&
         (address >= V8_VRAM_BASE || address < 0xF28000)) {
         v8video_write(address, value);

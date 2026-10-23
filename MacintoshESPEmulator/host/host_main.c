@@ -20,7 +20,9 @@
 #include "mac_disk_overlay.h"
 #include "mac_video.h"
 #include "mac_kbd.h"
+#include "mac_touch.h"
 #include "mac_v8disk.h"
+#include "mac_asc.h"
 #include "display.h"
 #include "esp_timer.h"
 #include "freertos/task.h"
@@ -36,6 +38,11 @@ static const char *opt_disk_rw = NULL;   /* --disk-rw FILE */
 static const char *opt_disk_out = NULL;  /* --disk-out FILE */
 static const char *opt_disk2_out = NULL; /* --disk2-out FILE (LC II, --disk2) */
 static const char *opt_out = "out";
+static struct { long f; int dx, dy; } host_mice[16];   /* --mouse F:DX:DY (relative mouse, one report) */
+static int host_nmice;
+static const char *opt_wav = NULL;    /* --wav FILE (MAC_SOUND=1): 44.1 kHz stereo WAV of the ASC output */
+static FILE *wav_file = NULL;
+static uint32_t wav_frames = 0;
 static int   opt_cpu = 0;             /* 0 = keep what mac_emu_init() chose */
 static long  frames = 0;
 static int64_t t_start_us;
@@ -228,9 +235,39 @@ static void host_keys_frame(void)
         if (host_keys[i].f == frames) kbd_key(host_keys[i].code, host_keys[i].down);
 }
 
+#if MAC_SOUND
+static void wav_header(FILE *f, uint32_t nframes)
+{
+    uint32_t data = nframes * 4, riff = 36 + data, rate = ASC_OUT_RATE, brate = ASC_OUT_RATE * 4;
+    uint16_t fmt = 1, ch = 2, align = 4, bits = 16;
+    uint32_t sixteen = 16;
+    fseek(f, 0, SEEK_SET);
+    fwrite("RIFF", 1, 4, f); fwrite(&riff, 4, 1, f); fwrite("WAVEfmt ", 1, 8, f);
+    fwrite(&sixteen, 4, 1, f); fwrite(&fmt, 2, 1, f); fwrite(&ch, 2, 1, f);
+    fwrite(&rate, 4, 1, f); fwrite(&brate, 4, 1, f); fwrite(&align, 2, 1, f);
+    fwrite(&bits, 2, 1, f); fwrite("data", 1, 4, f); fwrite(&data, 4, 1, f);
+}
+
+static void wav_frame(void)
+{
+    int16_t buf[2048 * 2];
+    uint32_t n;
+    if (!wav_file) return;
+    while ((n = asc_pull(buf, 2048)) > 0) {
+        fwrite(buf, 4, n, wav_file);
+        wav_frames += n;
+    }
+}
+#endif
+
 void host_frame_hook(void)
 {
     frames++;
+    for (int i = 0; i < host_nmice; i++)
+        if (host_mice[i].f == frames) touch_mouse_input(host_mice[i].dx, host_mice[i].dy, false);
+#if MAC_SOUND
+    wav_frame();
+#endif
     host_keys_frame();
     if (opt_vclock > 0) host_vclock_us = (int64_t)frames * opt_vclock;
     /* Event queue sanity: EvQHdr.qHead/qTail ($014C/$0150) must never
@@ -375,6 +412,14 @@ static void at_exit(void)
     double fps = frames / secs;
     fprintf(stderr, "H host: %ld frames in %.2f s = %.1f frames/s = %.0f%% Mac real-time (60 fps)\n",
             frames, secs, fps, fps / 60.0 * 100.0);
+#if MAC_SOUND
+    if (wav_file) {
+        wav_header(wav_file, wav_frames);
+        fclose(wav_file);
+        fprintf(stderr, "H host: wrote %u audio frames (%.2f s) to %s\n", wav_frames,
+                wav_frames / (double)ASC_OUT_RATE, opt_wav);
+    }
+#endif
     if (opt_dump_ram) {
         uint8_t *ram = mac_mem_get_ram();
         FILE *f = ram ? fopen(opt_dump_ram, "wb") : NULL;
@@ -423,6 +468,8 @@ static void usage(const char *argv0)
     fprintf(stderr,
         "usage: %s [--frames N] [--shot-every K] [--out DIR] [--dump-ram FILE] [--log FILE]\n"
         "  --frames N      stop after N emulated frames (default: run forever)\n"
+        "  --mouse F:DX:DY (EXTRA_DEFS=-DMAC_MOUSE_ADB=1, LC II) one relative USB-mouse report at frame F\n"
+        "  --wav FILE      (EXTRA_DEFS=-DMAC_SOUND=1, LC II) write the ASC output as a 44.1 kHz stereo WAV\n"
         "  --shot-every K  write out/frame_NNNNN.png + scrn_NNNNN.png every K frames (0=off, default 300)\n"
         "  --out DIR       screenshot directory (default: out)\n"
         "  --dump-ram FILE write the Mac RAM image to FILE at exit\n"
@@ -458,6 +505,13 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--shot-every") && v) { opt_shot_every = atol(v); i++; }
         else if (!strcmp(a, "--out") && v)        { opt_out = v; i++; }
         else if (!strcmp(a, "--dump-ram") && v)   { opt_dump_ram = v; i++; }
+        else if (!strcmp(a, "--wav") && v)        { opt_wav = v; i++; }
+        else if (!strcmp(a, "--mouse") && v && host_nmice < 16) {
+            long f; int dx, dy;
+            if (sscanf(v, "%ld:%d:%d", &f, &dx, &dy) != 3) { usage(argv[0]); return 2; }
+            host_mice[host_nmice].f = f; host_mice[host_nmice].dx = dx; host_mice[host_nmice].dy = dy;
+            host_nmice++; i++;
+        }
         else if (!strcmp(a, "--disk-rw") && v)    { opt_disk_rw = v; i++; }
         else if (!strcmp(a, "--disk-out") && v)   { opt_disk_out = v; i++; }
         else if (!strcmp(a, "--disk2-out") && v)  { opt_disk2_out = v; i++; }
@@ -540,6 +594,13 @@ int main(int argc, char **argv)
     t_start_us = real_time_us();
     if (opt_shot_every > 0) mkdir(opt_out, 0755);
 
+#if MAC_SOUND
+    if (opt_wav) {
+        wav_file = fopen(opt_wav, "wb");
+        if (!wav_file) { perror(opt_wav); return 1; }
+        wav_header(wav_file, 0);
+    }
+#endif
     atexit(at_exit);
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);

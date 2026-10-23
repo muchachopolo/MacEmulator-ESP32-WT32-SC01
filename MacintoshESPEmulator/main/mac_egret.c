@@ -43,6 +43,13 @@ static const char *TAG = "egret";
 #define EG_TIP      0x20
 #define EG_BYTEACK  0x10
 #define EG_DELAY    64      /* CPU cycles before the MCU answers an edge */
+#ifndef EGRET_COLLISION_FIX     /* 1 = resolve a command/packet collision late (see below) */
+#define EGRET_COLLISION_FIX 1
+#endif
+#define EG_DELAY_UNSOL 640  /* ... before the first byte of an unsolicited packet: the
+                             * ROM's command sender raises SysSes first and only then
+                             * sets ACR shift-out, SR and ViaFull, so the CPU must get
+                             * the chance to show that it is sending (collision) */
 #define EG_CUDA     MAC_V8_CUDA     /* Cuda line polarities (Color Classic) */
 #ifndef EGRET_ONE_SEC_TICKS             /* 1 = send the 1 Hz tick packets */
 #define EGRET_ONE_SEC_TICKS 1
@@ -430,6 +437,9 @@ void egret_portb_changed(uint8_t orb, uint8_t ddrb)
             eg.state = EG_REPLY;            /* CPU accepts the reply */
             eg.reply_idx = 0;
             schedule(ACT_BYTE);
+#if EGRET_COLLISION_FIX
+            if (eg.unsolicited) eg.delay = EG_DELAY_UNSOL;
+#endif
         } else if (eg.state == EG_IDLE || eg.state == EG_SYNC) {
             via_egret_set_treq(false);
             eg.state = EG_CMD;
@@ -478,6 +488,18 @@ void egret_portb_changed(uint8_t orb, uint8_t ddrb)
         }
         return;
     }
+#if EGRET_COLLISION_FIX
+    if (hs_out && shift_out && eg.state == EG_REPLY && eg.unsolicited && eg.reply_idx == 0) {
+        /* Collision seen late: SysSes rose while our autopoll/tick packet was
+         * waiting, and the first command byte only arrives now (ACR is shift-out).
+         * Drop the packet and take the command. */
+        unsolicited_untake();
+        eg.unsolicited = false;
+        eg.action = ACT_NONE;
+        eg.state = EG_CMD;
+        eg.cmd_len = 0;
+    }
+#endif
     if (hs_out && eg.state == EG_CMD && shift_out) {
         if (eg.cmd_len < (int)sizeof(eg.cmd))
             eg.cmd[eg.cmd_len++] = via_get_sr();
@@ -582,6 +604,18 @@ void egret_tick(int cycles)
         via_egret_shift_done(true, 0x00);
         break;
     case ACT_BYTE: {
+#if EGRET_COLLISION_FIX
+        if (eg.unsolicited && eg.reply_idx == 0 && eg.state == EG_REPLY &&
+            (via_get_acr() & 0x10)) {
+            /* The CPU is shifting out (a command), not waiting for our packet:
+             * collision. The command byte follows with the ViaFull rise. */
+            unsolicited_untake();
+            eg.unsolicited = false;
+            eg.state = EG_CMD;
+            eg.cmd_len = 0;
+            break;
+        }
+#endif
         uint8_t b = eg.reply[eg.reply_idx++];
         if (eg.stream && eg.reply_idx >= eg.reply_len) {
             eg.reply_idx = eg.reply_len = 0;    /* refill with next PRAM byte */

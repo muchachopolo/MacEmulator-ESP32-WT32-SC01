@@ -12,7 +12,7 @@ Switch defaults: [`CLAUDE.md`](../CLAUDE.md#build-switches).
 | Video | framebuffer in RAM | VDAC, pseudo-VIA2, VRAM | `mac_video.c`, `mac_v8video.c` |
 | SCSI NCR 5380 | empty bus | empty bus | `mac_scsi.c` |
 | SCC Z8530 | stub | stub | `mac_scc.c` |
-| Sound (ASC / sound buffer) | not emulated | not emulated | — |
+| Sound (ASC / sound buffer) | not emulated | ASC FIFO mode, `MAC_SOUND=1` (Pi port: HDMI audio); off elsewhere | `mac_asc.c` |
 
 ## VIA 6522 (`mac_via.c`)
 
